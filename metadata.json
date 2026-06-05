@@ -1,6 +1,6 @@
 {
-  "name": "Al-Kali Manufacture Attendance System",
-  "description": "Official synchronized attendance, roster profiles, department workflows, and salary archiving portal for Al-Kali Manufacture.",
+  "name": "KaprayOfficial Attendance System",
+  "description": "Official synchronized attendance, roster profiles, department workflows, and salary archiving portal for KaprayOfficial.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

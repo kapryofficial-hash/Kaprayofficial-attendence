@@ -121,4 +121,30 @@ export interface EmployeeAllowance {
   approved_by: string;
 }
 
+export type AllowedUserRole = 'super_admin' | 'admin' | 'manager' | 'staff_viewer';
+
+export interface UserProfileRole {
+  id: string;
+  user_id: string; // UUID from auth.users
+  email?: string;  // helper client field
+  role: AllowedUserRole;
+  employee_id: string | null; // connected employee ID for staff_viewer
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface AuditLog {
+  id: string;
+  user_id: string | null;
+  user_email: string;
+  role: string;
+  action: string;
+  table_name: string;
+  record_id: string;
+  old_data?: any;
+  new_data?: any;
+  created_at?: string;
+}
+
+
 

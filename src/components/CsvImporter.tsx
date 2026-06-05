@@ -57,7 +57,7 @@ export function CsvImporter({ employees, existingAttendance, onImportComplete, o
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.setAttribute('download', 'Al-Kali_Attendance_Template.csv');
+    link.setAttribute('download', 'KaprayOfficial_Attendance_Template.csv');
     link.click();
     URL.revokeObjectURL(url);
   };
@@ -803,7 +803,7 @@ export function CsvImporter({ employees, existingAttendance, onImportComplete, o
         <div className="bg-slate-50 border-t border-slate-200 px-6 py-3.5 flex items-center justify-between text-xs text-slate-450 text-slate-500">
           <div className="flex items-center gap-1">
             <FileText className="h-4 w-4 text-slate-400" />
-            <span>Al-Kali Import System strictly validates timestamps to protect previous month archives</span>
+            <span>KaprayOfficial Import System strictly validates timestamps to protect previous month archives</span>
           </div>
           <button 
             onClick={onClose}

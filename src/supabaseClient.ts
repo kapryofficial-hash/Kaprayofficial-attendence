@@ -48,9 +48,9 @@ export function getSupabaseClient() {
   try {
     const client = createClient(url, key, {
       auth: {
-        persistSession: false,
-        autoRefreshToken: false,
-        detectSessionInUrl: false
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true
       }
     });
     (globalThis as any)._supabaseClient = client;
@@ -215,12 +215,37 @@ CREATE TABLE IF NOT EXISTS public.employee_allowances (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 10. INDEXES FOR SPEEDY LOADS
+-- 10. USER ROLES TABLE (Authorized Roles)
+CREATE TABLE IF NOT EXISTS public.user_roles (
+  id TEXT PRIMARY KEY,
+  user_id UUID NOT NULL, -- references auth.users(id) on delete cascade
+  role TEXT NOT NULL, -- 'super_admin' | 'admin' | 'manager' | 'staff_viewer'
+  employee_id TEXT NULL, -- connected employee code for staff_viewer role
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 11. AUDIT LOGS TABLE
+CREATE TABLE IF NOT EXISTS public.audit_logs (
+  id TEXT PRIMARY KEY,
+  user_id UUID,
+  user_email TEXT NOT NULL,
+  role TEXT NOT NULL,
+  action TEXT NOT NULL,
+  table_name TEXT,
+  record_id TEXT,
+  old_data JSONB,
+  new_data JSONB,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 12. INDEXES FOR SPEEDY LOADS
 CREATE INDEX IF NOT EXISTS idx_attendance_date ON public.attendance_records(attendance_date);
 CREATE INDEX IF NOT EXISTS idx_attendance_employee ON public.attendance_records(employee_id);
 CREATE INDEX IF NOT EXISTS idx_employees_status ON public.employees(status);
+CREATE INDEX IF NOT EXISTS idx_user_roles_uid ON public.user_roles(user_id);
 
--- 11. ENABLE ROW LEVEL SECURITY
+-- 13. ENABLE ROW LEVEL SECURITY
 ALTER TABLE public.departments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.employees ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.attendance_records ENABLE ROW LEVEL SECURITY;
@@ -230,57 +255,163 @@ ALTER TABLE public.import_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.monthly_reports ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.employee_commissions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.employee_allowances ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.user_roles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;
 
+-- 14. SECURITY HELPER FUNCTIONS
+CREATE OR REPLACE FUNCTION public.get_user_role()
+RETURNS text SECURITY DEFINER AS $$
+BEGIN
+  RETURN (SELECT role FROM public.user_roles WHERE user_id = auth.uid() LIMIT 1);
+END;
+$$ LANGUAGE plpgsql;
 
--- 10. OPEN POLICIES FOR ANONYMOUS SYSTEM OPERATION
-CREATE POLICY "Allow anon select departments" ON public.departments FOR SELECT USING (true);
-CREATE POLICY "Allow anon insert departments" ON public.departments FOR INSERT WITH CHECK (true);
-CREATE POLICY "Allow anon update departments" ON public.departments FOR UPDATE USING (true);
-CREATE POLICY "Allow anon delete departments" ON public.departments FOR DELETE USING (true);
+CREATE OR REPLACE FUNCTION public.get_user_employee_id()
+RETURNS text SECURITY DEFINER AS $$
+BEGIN
+  RETURN (SELECT employee_id FROM public.user_roles WHERE user_id = auth.uid() LIMIT 1);
+END;
+$$ LANGUAGE plpgsql;
 
-CREATE POLICY "Allow anon select employees" ON public.employees FOR SELECT USING (true);
-CREATE POLICY "Allow anon insert employees" ON public.employees FOR INSERT WITH CHECK (true);
-CREATE POLICY "Allow anon update employees" ON public.employees FOR UPDATE USING (true);
-CREATE POLICY "Allow anon delete employees" ON public.employees FOR DELETE USING (true);
+-- 15. SECURE ROLE-BASED ACCESS POLICIES (ANONYMOUS BLOCKED)
 
-CREATE POLICY "Allow anon select attendance" ON public.attendance_records FOR SELECT USING (true);
-CREATE POLICY "Allow anon insert attendance" ON public.attendance_records FOR INSERT WITH CHECK (true);
-CREATE POLICY "Allow anon update attendance" ON public.attendance_records FOR UPDATE USING (true);
-CREATE POLICY "Allow anon delete attendance" ON public.attendance_records FOR DELETE USING (true);
+-- DEPARTMENTS POLICIES
+DROP POLICY IF EXISTS "Allow anon select departments" ON public.departments;
+DROP POLICY IF EXISTS "Allow anon insert departments" ON public.departments;
+DROP POLICY IF EXISTS "Allow anon update departments" ON public.departments;
+DROP POLICY IF EXISTS "Allow anon delete departments" ON public.departments;
 
-CREATE POLICY "Allow anon select edit_history" ON public.attendance_edit_history FOR SELECT USING (true);
-CREATE POLICY "Allow anon insert edit_history" ON public.attendance_edit_history FOR INSERT WITH CHECK (true);
-CREATE POLICY "Allow anon update edit_history" ON public.attendance_edit_history FOR UPDATE USING (true);
-CREATE POLICY "Allow anon delete edit_history" ON public.attendance_edit_history FOR DELETE USING (true);
+CREATE POLICY "super_admin_manage_departments" ON public.departments FOR ALL
+  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
+CREATE POLICY "admin_manager_select_departments" ON public.departments FOR SELECT
+  USING (public.get_user_role() IN ('super_admin', 'admin', 'manager'));
 
-CREATE POLICY "Allow anon select deleted" ON public.deleted_records FOR SELECT USING (true);
-CREATE POLICY "Allow anon insert deleted" ON public.deleted_records FOR INSERT WITH CHECK (true);
-CREATE POLICY "Allow anon update deleted" ON public.deleted_records FOR UPDATE USING (true);
-CREATE POLICY "Allow anon delete deleted" ON public.deleted_records FOR DELETE USING (true);
+-- EMPLOYEES POLICIES
+DROP POLICY IF EXISTS "Allow anon select employees" ON public.employees;
+DROP POLICY IF EXISTS "Allow anon insert employees" ON public.employees;
+DROP POLICY IF EXISTS "Allow anon update employees" ON public.employees;
+DROP POLICY IF EXISTS "Allow anon delete employees" ON public.employees;
 
-CREATE POLICY "Allow anon select imports" ON public.import_logs FOR SELECT USING (true);
-CREATE POLICY "Allow anon insert imports" ON public.import_logs FOR INSERT WITH CHECK (true);
-CREATE POLICY "Allow anon update imports" ON public.import_logs FOR UPDATE USING (true);
-CREATE POLICY "Allow anon delete imports" ON public.import_logs FOR DELETE USING (true);
+CREATE POLICY "super_admin_all_employees" ON public.employees FOR ALL
+  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
+CREATE POLICY "admin_insert_update_employees" ON public.employees FOR ALL
+  USING (public.get_user_role() = 'admin') WITH CHECK (public.get_user_role() = 'admin');
+CREATE POLICY "manager_select_employees" ON public.employees FOR SELECT
+  USING (public.get_user_role() = 'manager');
+CREATE POLICY "staff_viewer_select_own_employee" ON public.employees FOR SELECT
+  USING (public.get_user_role() = 'staff_viewer' AND id = public.get_user_employee_id());
 
-CREATE POLICY "Allow anon select monthly" ON public.monthly_reports FOR SELECT USING (true);
-CREATE POLICY "Allow anon insert monthly" ON public.monthly_reports FOR INSERT WITH CHECK (true);
-CREATE POLICY "Allow anon update monthly" ON public.monthly_reports FOR UPDATE USING (true);
-CREATE POLICY "Allow anon delete monthly" ON public.monthly_reports FOR DELETE USING (true);
+-- ATTENDANCE RECORDS POLICIES
+DROP POLICY IF EXISTS "Allow anon select attendance" ON public.attendance_records;
+DROP POLICY IF EXISTS "Allow anon insert attendance" ON public.attendance_records;
+DROP POLICY IF EXISTS "Allow anon update attendance" ON public.attendance_records;
+DROP POLICY IF EXISTS "Allow anon delete attendance" ON public.attendance_records;
 
-CREATE POLICY "Allow anon select commissions" ON public.employee_commissions FOR SELECT USING (true);
-CREATE POLICY "Allow anon insert commissions" ON public.employee_commissions FOR INSERT WITH CHECK (true);
-CREATE POLICY "Allow anon update commissions" ON public.employee_commissions FOR UPDATE USING (true);
-CREATE POLICY "Allow anon delete commissions" ON public.employee_commissions FOR DELETE USING (true);
+CREATE POLICY "super_admin_all_attendance" ON public.attendance_records FOR ALL
+  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
+CREATE POLICY "admin_manager_insert_update_attendance" ON public.attendance_records FOR ALL
+  USING (public.get_user_role() IN ('admin', 'manager')) WITH CHECK (public.get_user_role() IN ('admin', 'manager'));
+CREATE POLICY "staff_viewer_select_own_attendance" ON public.attendance_records FOR SELECT
+  USING (public.get_user_role() = 'staff_viewer' AND employee_id = public.get_user_employee_id());
 
-CREATE POLICY "Allow anon select allowances" ON public.employee_allowances FOR SELECT USING (true);
-CREATE POLICY "Allow anon insert allowances" ON public.employee_allowances FOR INSERT WITH CHECK (true);
-CREATE POLICY "Allow anon update allowances" ON public.employee_allowances FOR UPDATE USING (true);
-CREATE POLICY "Allow anon delete allowances" ON public.employee_allowances FOR DELETE USING (true);
+-- ATTENDANCE EDIT HISTORY POLICIES
+DROP POLICY IF EXISTS "Allow anon select edit_history" ON public.attendance_edit_history;
+DROP POLICY IF EXISTS "Allow anon insert edit_history" ON public.attendance_edit_history;
+DROP POLICY IF EXISTS "Allow anon update edit_history" ON public.attendance_edit_history;
+DROP POLICY IF EXISTS "Allow anon delete edit_history" ON public.attendance_edit_history;
+
+CREATE POLICY "super_admin_all_edit_history" ON public.attendance_edit_history FOR ALL
+  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
+CREATE POLICY "admin_manager_insert_select_edit_history" ON public.attendance_edit_history FOR ALL
+  USING (public.get_user_role() IN ('admin', 'manager')) WITH CHECK (public.get_user_role() IN ('admin', 'manager'));
+
+-- DELETED RECORDS POLICIES (RECYCLE BIN)
+DROP POLICY IF EXISTS "Allow anon select deleted" ON public.deleted_records;
+DROP POLICY IF EXISTS "Allow anon insert deleted" ON public.deleted_records;
+DROP POLICY IF EXISTS "Allow anon update deleted" ON public.deleted_records;
+DROP POLICY IF EXISTS "Allow anon delete deleted" ON public.deleted_records;
+
+CREATE POLICY "super_admin_all_deleted" ON public.deleted_records FOR ALL
+  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
+CREATE POLICY "admin_insert_select_deleted" ON public.deleted_records FOR ALL
+  USING (public.get_user_role() = 'admin') WITH CHECK (public.get_user_role() = 'admin');
+
+-- IMPORT LOGS POLICIES
+DROP POLICY IF EXISTS "Allow anon select imports" ON public.import_logs;
+DROP POLICY IF EXISTS "Allow anon insert imports" ON public.import_logs;
+DROP POLICY IF EXISTS "Allow anon update imports" ON public.import_logs;
+DROP POLICY IF EXISTS "Allow anon delete imports" ON public.import_logs;
+
+CREATE POLICY "super_admin_all_imports" ON public.import_logs FOR ALL
+  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
+CREATE POLICY "admin_insert_select_imports" ON public.import_logs FOR ALL
+  USING (public.get_user_role() = 'admin') WITH CHECK (public.get_user_role() = 'admin');
+
+-- MONTHLY REPORTS POLICIES
+DROP POLICY IF EXISTS "Allow anon select monthly" ON public.monthly_reports;
+DROP POLICY IF EXISTS "Allow anon insert monthly" ON public.monthly_reports;
+DROP POLICY IF EXISTS "Allow anon update monthly" ON public.monthly_reports;
+DROP POLICY IF EXISTS "Allow anon delete monthly" ON public.monthly_reports;
+
+CREATE POLICY "super_admin_all_monthly" ON public.monthly_reports FOR ALL
+  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
+CREATE POLICY "admin_insert_update_monthly" ON public.monthly_reports FOR ALL
+  USING (public.get_user_role() = 'admin') WITH CHECK (public.get_user_role() = 'admin');
+CREATE POLICY "manager_select_monthly" ON public.monthly_reports FOR SELECT
+  USING (public.get_user_role() = 'manager');
+CREATE POLICY "staff_viewer_select_own_monthly" ON public.monthly_reports FOR SELECT
+  USING (public.get_user_role() = 'staff_viewer' AND employee_id = public.get_user_employee_id());
+
+-- EMPLOYEE COMMISSIONS POLICIES
+DROP POLICY IF EXISTS "Allow anon select commissions" ON public.employee_commissions;
+DROP POLICY IF EXISTS "Allow anon insert commissions" ON public.employee_commissions;
+DROP POLICY IF EXISTS "Allow anon update commissions" ON public.employee_commissions;
+DROP POLICY IF EXISTS "Allow anon delete commissions" ON public.employee_commissions;
+
+CREATE POLICY "super_admin_all_commissions" ON public.employee_commissions FOR ALL
+  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
+CREATE POLICY "admin_insert_update_commissions" ON public.employee_commissions FOR ALL
+  USING (public.get_user_role() = 'admin') WITH CHECK (public.get_user_role() = 'admin');
+CREATE POLICY "staff_viewer_select_own_commissions" ON public.employee_commissions FOR SELECT
+  USING (public.get_user_role() = 'staff_viewer' AND employee_id = public.get_user_employee_id());
+
+-- EMPLOYEE ALLOWANCES POLICIES
+DROP POLICY IF EXISTS "Allow anon select allowances" ON public.employee_allowances;
+DROP POLICY IF EXISTS "Allow anon insert allowances" ON public.employee_allowances;
+DROP POLICY IF EXISTS "Allow anon update allowances" ON public.employee_allowances;
+DROP POLICY IF EXISTS "Allow anon delete allowances" ON public.employee_allowances;
+
+CREATE POLICY "super_admin_all_allowances" ON public.employee_allowances FOR ALL
+  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
+CREATE POLICY "admin_insert_update_allowances" ON public.employee_allowances FOR ALL
+  USING (public.get_user_role() = 'admin') WITH CHECK (public.get_user_role() = 'admin');
+CREATE POLICY "staff_viewer_select_own_allowances" ON public.employee_allowances FOR SELECT
+  USING (public.get_user_role() = 'staff_viewer' AND employee_id = public.get_user_employee_id());
+
+-- USER ROLES POLICIES
+DROP POLICY IF EXISTS "super_admin_all_user_roles" ON public.user_roles;
+DROP POLICY IF EXISTS "all_select_own_user_roles" ON public.user_roles;
+
+CREATE POLICY "super_admin_all_user_roles" ON public.user_roles FOR ALL
+  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
+CREATE POLICY "all_select_own_user_roles" ON public.user_roles FOR SELECT
+  USING (user_id = auth.uid());
+
+-- AUDIT LOGS POLICIES
+DROP POLICY IF EXISTS "super_admin_select_audit_logs" ON public.audit_logs;
+DROP POLICY IF EXISTS "authenticated_insert_audit_logs" ON public.audit_logs;
+
+CREATE POLICY "super_admin_select_audit_logs" ON public.audit_logs FOR SELECT
+  USING (public.get_user_role() = 'super_admin');
+CREATE POLICY "authenticated_insert_audit_logs" ON public.audit_logs FOR INSERT
+  WITH CHECK (auth.uid() IS NOT NULL);
+  
+-- DONE! SECURED SYSTEM MIGRATION SUCCESSFULLY COMPLETED!
+
 `;
 
-export const SQL_MIGRATION_SCRIPT = `-- AL-KALI MAKERS ATTENDANCE SYSTEM - SAFE UPGRADE MIGRATION SCRIPT
--- RUN THIS IN YOUR SUPABASE SQL EDITOR TO PATCH MISSING COLUMNS SECURELY WITHOUT DATA LOSS!
+export const SQL_MIGRATION_SCRIPT = `-- KAPRAYOFFICIAL ATTENDANCE SYSTEM - SAFE UPGRADE MIGRATION SCRIPT
+-- RUN THIS IN YOUR SUPABASE SQL EDITOR TO PATCH MISSING COLUMNS SECURELY WITHOUT DATA LOSS AND ENABLE COMPLETE AUTH/ROLE SECURITY!
 
 -- 1. UPGRADE Departments
 ALTER TABLE public.departments ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT false;
@@ -368,7 +499,30 @@ CREATE TABLE IF NOT EXISTS public.monthly_reports (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 8. RE-APPLY RLS & GENERAL POLICIES
+-- 8. CREATE User Roles and Audit Logs Tables if missing
+CREATE TABLE IF NOT EXISTS public.user_roles (
+  id TEXT PRIMARY KEY,
+  user_id UUID NOT NULL, -- references auth.users(id) on delete cascade
+  role TEXT NOT NULL, -- 'super_admin' | 'admin' | 'manager' | 'staff_viewer'
+  employee_id TEXT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.audit_logs (
+  id TEXT PRIMARY KEY,
+  user_id UUID,
+  user_email TEXT NOT NULL,
+  role TEXT NOT NULL,
+  action TEXT NOT NULL,
+  table_name TEXT,
+  record_id TEXT,
+  old_data JSONB,
+  new_data JSONB,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 9. RE-APPLY RLS, SECURITY HELPERS, AND SECURE ROLE POLICIES
 ALTER TABLE public.departments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.employees ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.attendance_records ENABLE ROW LEVEL SECURITY;
@@ -376,69 +530,172 @@ ALTER TABLE public.attendance_edit_history ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.deleted_records ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.import_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.monthly_reports ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.employee_commissions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.employee_allowances ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.user_roles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;
 
+CREATE OR REPLACE FUNCTION public.get_user_role()
+RETURNS text SECURITY DEFINER AS $$
+BEGIN
+  RETURN (SELECT role FROM public.user_roles WHERE user_id = auth.uid() LIMIT 1);
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION public.get_user_employee_id()
+RETURNS text SECURITY DEFINER AS $$
+BEGIN
+  RETURN (SELECT employee_id FROM public.user_roles WHERE user_id = auth.uid() LIMIT 1);
+END;
+$$ LANGUAGE plpgsql;
+
+-- CLEAN AND RE-APPLY POLICIES
+-- DEPARTMENTS
 DROP POLICY IF EXISTS "Allow anon select departments" ON public.departments;
-CREATE POLICY "Allow anon select departments" ON public.departments FOR SELECT USING (true);
 DROP POLICY IF EXISTS "Allow anon insert departments" ON public.departments;
-CREATE POLICY "Allow anon insert departments" ON public.departments FOR INSERT WITH CHECK (true);
 DROP POLICY IF EXISTS "Allow anon update departments" ON public.departments;
-CREATE POLICY "Allow anon update departments" ON public.departments FOR UPDATE USING (true);
 DROP POLICY IF EXISTS "Allow anon delete departments" ON public.departments;
-CREATE POLICY "Allow anon delete departments" ON public.departments FOR DELETE USING (true);
+DROP POLICY IF EXISTS "super_admin_manage_departments" ON public.departments;
+DROP POLICY IF EXISTS "admin_manager_select_departments" ON public.departments;
 
+CREATE POLICY "super_admin_manage_departments" ON public.departments FOR ALL
+  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
+CREATE POLICY "admin_manager_select_departments" ON public.departments FOR SELECT
+  USING (public.get_user_role() IN ('super_admin', 'admin', 'manager'));
+
+-- EMPLOYEES
 DROP POLICY IF EXISTS "Allow anon select employees" ON public.employees;
-CREATE POLICY "Allow anon select employees" ON public.employees FOR SELECT USING (true);
 DROP POLICY IF EXISTS "Allow anon insert employees" ON public.employees;
-CREATE POLICY "Allow anon insert employees" ON public.employees FOR INSERT WITH CHECK (true);
 DROP POLICY IF EXISTS "Allow anon update employees" ON public.employees;
-CREATE POLICY "Allow anon update employees" ON public.employees FOR UPDATE USING (true);
 DROP POLICY IF EXISTS "Allow anon delete employees" ON public.employees;
-CREATE POLICY "Allow anon delete employees" ON public.employees FOR DELETE USING (true);
+DROP POLICY IF EXISTS "super_admin_all_employees" ON public.employees;
+DROP POLICY IF EXISTS "admin_insert_update_employees" ON public.employees;
+DROP POLICY IF EXISTS "manager_select_employees" ON public.employees;
+DROP POLICY IF EXISTS "staff_viewer_select_own_employee" ON public.employees;
 
+CREATE POLICY "super_admin_all_employees" ON public.employees FOR ALL
+  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
+CREATE POLICY "admin_insert_update_employees" ON public.employees FOR ALL
+  USING (public.get_user_role() = 'admin') WITH CHECK (public.get_user_role() = 'admin');
+CREATE POLICY "manager_select_employees" ON public.employees FOR SELECT
+  USING (public.get_user_role() = 'manager');
+CREATE POLICY "staff_viewer_select_own_employee" ON public.employees FOR SELECT
+  USING (public.get_user_role() = 'staff_viewer' AND id = public.get_user_employee_id());
+
+-- ATTENDANCE RECORDS
 DROP POLICY IF EXISTS "Allow anon select attendance" ON public.attendance_records;
-CREATE POLICY "Allow anon select attendance" ON public.attendance_records FOR SELECT USING (true);
 DROP POLICY IF EXISTS "Allow anon insert attendance" ON public.attendance_records;
-CREATE POLICY "Allow anon insert attendance" ON public.attendance_records FOR INSERT WITH CHECK (true);
 DROP POLICY IF EXISTS "Allow anon update attendance" ON public.attendance_records;
-CREATE POLICY "Allow anon update attendance" ON public.attendance_records FOR UPDATE USING (true);
 DROP POLICY IF EXISTS "Allow anon delete attendance" ON public.attendance_records;
-CREATE POLICY "Allow anon delete attendance" ON public.attendance_records FOR DELETE USING (true);
+DROP POLICY IF EXISTS "super_admin_all_attendance" ON public.attendance_records;
+DROP POLICY IF EXISTS "admin_manager_insert_update_attendance" ON public.attendance_records;
+DROP POLICY IF EXISTS "staff_viewer_select_own_attendance" ON public.attendance_records;
 
+CREATE POLICY "super_admin_all_attendance" ON public.attendance_records FOR ALL
+  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
+CREATE POLICY "admin_manager_insert_update_attendance" ON public.attendance_records FOR ALL
+  USING (public.get_user_role() IN ('admin', 'manager')) WITH CHECK (public.get_user_role() IN ('admin', 'manager'));
+CREATE POLICY "staff_viewer_select_own_attendance" ON public.attendance_records FOR SELECT
+  USING (public.get_user_role() = 'staff_viewer' AND employee_id = public.get_user_employee_id());
+
+-- ATTENDANCE EDIT HISTORY
 DROP POLICY IF EXISTS "Allow anon select edit_history" ON public.attendance_edit_history;
-CREATE POLICY "Allow anon select edit_history" ON public.attendance_edit_history FOR SELECT USING (true);
 DROP POLICY IF EXISTS "Allow anon insert edit_history" ON public.attendance_edit_history;
-CREATE POLICY "Allow anon insert edit_history" ON public.attendance_edit_history FOR INSERT WITH CHECK (true);
 DROP POLICY IF EXISTS "Allow anon update edit_history" ON public.attendance_edit_history;
-CREATE POLICY "Allow anon update edit_history" ON public.attendance_edit_history FOR UPDATE USING (true);
 DROP POLICY IF EXISTS "Allow anon delete edit_history" ON public.attendance_edit_history;
-CREATE POLICY "Allow anon delete edit_history" ON public.attendance_edit_history FOR DELETE USING (true);
+DROP POLICY IF EXISTS "super_admin_all_edit_history" ON public.attendance_edit_history;
+DROP POLICY IF EXISTS "admin_manager_insert_select_edit_history" ON public.attendance_edit_history;
 
+CREATE POLICY "super_admin_all_edit_history" ON public.attendance_edit_history FOR ALL
+  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
+CREATE POLICY "admin_manager_insert_select_edit_history" ON public.attendance_edit_history FOR ALL
+  USING (public.get_user_role() IN ('admin', 'manager')) WITH CHECK (public.get_user_role() IN ('admin', 'manager'));
+
+-- DELETED RECORDS
 DROP POLICY IF EXISTS "Allow anon select deleted" ON public.deleted_records;
-CREATE POLICY "Allow anon select deleted" ON public.deleted_records FOR SELECT USING (true);
 DROP POLICY IF EXISTS "Allow anon insert deleted" ON public.deleted_records;
-CREATE POLICY "Allow anon insert deleted" ON public.deleted_records FOR INSERT WITH CHECK (true);
 DROP POLICY IF EXISTS "Allow anon update deleted" ON public.deleted_records;
-CREATE POLICY "Allow anon update deleted" ON public.deleted_records FOR UPDATE USING (true);
 DROP POLICY IF EXISTS "Allow anon delete deleted" ON public.deleted_records;
-CREATE POLICY "Allow anon delete deleted" ON public.deleted_records FOR DELETE USING (true);
+DROP POLICY IF EXISTS "super_admin_all_deleted" ON public.deleted_records;
+DROP POLICY IF EXISTS "admin_insert_select_deleted" ON public.deleted_records;
 
+CREATE POLICY "super_admin_all_deleted" ON public.deleted_records FOR ALL
+  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
+CREATE POLICY "admin_insert_select_deleted" ON public.deleted_records FOR ALL
+  USING (public.get_user_role() = 'admin') WITH CHECK (public.get_user_role() = 'admin');
+
+-- IMPORT LOGS
 DROP POLICY IF EXISTS "Allow anon select imports" ON public.import_logs;
-CREATE POLICY "Allow anon select imports" ON public.import_logs FOR SELECT USING (true);
 DROP POLICY IF EXISTS "Allow anon insert imports" ON public.import_logs;
-CREATE POLICY "Allow anon insert imports" ON public.import_logs FOR INSERT WITH CHECK (true);
 DROP POLICY IF EXISTS "Allow anon update imports" ON public.import_logs;
-CREATE POLICY "Allow anon update imports" ON public.import_logs FOR UPDATE USING (true);
 DROP POLICY IF EXISTS "Allow anon delete imports" ON public.import_logs;
-CREATE POLICY "Allow anon delete imports" ON public.import_logs FOR DELETE USING (true);
+DROP POLICY IF EXISTS "super_admin_all_imports" ON public.import_logs;
+DROP POLICY IF EXISTS "admin_insert_select_imports" ON public.import_logs;
 
+CREATE POLICY "super_admin_all_imports" ON public.import_logs FOR ALL
+  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
+CREATE POLICY "admin_insert_select_imports" ON public.import_logs FOR ALL
+  USING (public.get_user_role() = 'admin') WITH CHECK (public.get_user_role() = 'admin');
+
+-- MONTHLY REPORTS
 DROP POLICY IF EXISTS "Allow anon select monthly" ON public.monthly_reports;
-CREATE POLICY "Allow anon select monthly" ON public.monthly_reports FOR SELECT USING (true);
 DROP POLICY IF EXISTS "Allow anon insert monthly" ON public.monthly_reports;
-CREATE POLICY "Allow anon insert monthly" ON public.monthly_reports FOR INSERT WITH CHECK (true);
 DROP POLICY IF EXISTS "Allow anon update monthly" ON public.monthly_reports;
-CREATE POLICY "Allow anon update monthly" ON public.monthly_reports FOR UPDATE USING (true);
 DROP POLICY IF EXISTS "Allow anon delete monthly" ON public.monthly_reports;
-CREATE POLICY "Allow anon delete monthly" ON public.monthly_reports FOR DELETE USING (true);
+DROP POLICY IF EXISTS "super_admin_all_monthly" ON public.monthly_reports;
+DROP POLICY IF EXISTS "admin_insert_update_monthly" ON public.monthly_reports;
+DROP POLICY IF EXISTS "manager_select_monthly" ON public.monthly_reports;
+DROP POLICY IF EXISTS "staff_viewer_select_own_monthly" ON public.monthly_reports;
+
+CREATE POLICY "super_admin_all_monthly" ON public.monthly_reports FOR ALL
+  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
+CREATE POLICY "admin_insert_update_monthly" ON public.monthly_reports FOR ALL
+  USING (public.get_user_role() = 'admin') WITH CHECK (public.get_user_role() = 'admin');
+CREATE POLICY "manager_select_monthly" ON public.monthly_reports FOR SELECT
+  USING (public.get_user_role() = 'manager');
+CREATE POLICY "staff_viewer_select_own_monthly" ON public.monthly_reports FOR SELECT
+  USING (public.get_user_role() = 'staff_viewer' AND employee_id = public.get_user_employee_id());
+
+-- COMMISSIONS & ALLOWANCES
+DROP POLICY IF EXISTS "super_admin_all_commissions" ON public.employee_commissions;
+DROP POLICY IF EXISTS "admin_insert_update_commissions" ON public.employee_commissions;
+DROP POLICY IF EXISTS "staff_viewer_select_own_commissions" ON public.employee_commissions;
+DROP POLICY IF EXISTS "super_admin_all_allowances" ON public.employee_allowances;
+DROP POLICY IF EXISTS "admin_insert_update_allowances" ON public.employee_allowances;
+DROP POLICY IF EXISTS "staff_viewer_select_own_allowances" ON public.employee_allowances;
+
+CREATE POLICY "super_admin_all_commissions" ON public.employee_commissions FOR ALL
+  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
+CREATE POLICY "admin_insert_update_commissions" ON public.employee_commissions FOR ALL
+  USING (public.get_user_role() = 'admin') WITH CHECK (public.get_user_role() = 'admin');
+CREATE POLICY "staff_viewer_select_own_commissions" ON public.employee_commissions FOR SELECT
+  USING (public.get_user_role() = 'staff_viewer' AND employee_id = public.get_user_employee_id());
+
+CREATE POLICY "super_admin_all_allowances" ON public.employee_allowances FOR ALL
+  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
+CREATE POLICY "admin_insert_update_allowances" ON public.employee_allowances FOR ALL
+  USING (public.get_user_role() = 'admin') WITH CHECK (public.get_user_role() = 'admin');
+CREATE POLICY "staff_viewer_select_own_allowances" ON public.employee_allowances FOR SELECT
+  USING (public.get_user_role() = 'staff_viewer' AND employee_id = public.get_user_employee_id());
+
+-- USER ROLES POLICIES
+DROP POLICY IF EXISTS "super_admin_all_user_roles" ON public.user_roles;
+DROP POLICY IF EXISTS "all_select_own_user_roles" ON public.user_roles;
+
+CREATE POLICY "super_admin_all_user_roles" ON public.user_roles FOR ALL
+  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
+CREATE POLICY "all_select_own_user_roles" ON public.user_roles FOR SELECT
+  USING (user_id = auth.uid());
+
+-- AUDIT LOGS POLICIES
+DROP POLICY IF EXISTS "super_admin_select_audit_logs" ON public.audit_logs;
+DROP POLICY IF EXISTS "authenticated_insert_audit_logs" ON public.audit_logs;
+
+CREATE POLICY "super_admin_select_audit_logs" ON public.audit_logs FOR SELECT
+  USING (public.get_user_role() = 'super_admin');
+CREATE POLICY "authenticated_insert_audit_logs" ON public.audit_logs FOR INSERT
+  WITH CHECK (auth.uid() IS NOT NULL);
+
 `;
 
 export interface DbDepartment {

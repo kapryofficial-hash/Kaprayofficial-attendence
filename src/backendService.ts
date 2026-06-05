@@ -9,7 +9,7 @@ import {
   DbDepartment
 } from './supabaseClient';
 import { calculateAttendanceRecord } from './utils';
-import { EmployeeCommission, EmployeeAllowance } from './types';
+import { EmployeeCommission, EmployeeAllowance, AuditLog } from './types';
 
 const EMPLOYEES_LS_KEY = 'excel_erp_employees';
 const ATTENDANCE_LS_KEY = 'excel_erp_attendance_records';
@@ -33,10 +33,10 @@ const DEFAULT_DEPARTMENTS: DbDepartment[] = [
 
 // Professional Default staff for immediate visual onboarding
 const DEFAULT_STAFF: DbEmployee[] = [
-  { id: 'EMP-01', employee_code: 'EMP-01', employee_name: 'Zeeshan Ali', name: 'Zeeshan Ali', email: 'zeeshan@alkali.pk', designation: 'General Master Stitcher', department: 'Stitching', department_id: 'dept-stitching', department_name: 'Stitching', base_salary: 45000, active: true, status: 'Active', is_deleted: false, created_at: new Date().toISOString() },
-  { id: 'EMP-02', employee_code: 'EMP-02', employee_name: 'Muhammad Ahsan', name: 'Muhammad Ahsan', email: 'ahsan@alkali.pk', designation: 'Senior Master Cutting', department: 'Cutting', department_id: 'dept-cutting', department_name: 'Cutting', base_salary: 50000, active: true, status: 'Active', is_deleted: false, created_at: new Date().toISOString() },
-  { id: 'EMP-03', employee_code: 'EMP-03', employee_name: 'Bilal Khan', name: 'Bilal Khan', email: 'bilal@alkali.pk', designation: 'Finishing Supervisor', department: 'Finishing', department_id: 'dept-finishing', department_name: 'Finishing', base_salary: 32000, active: true, status: 'Active', is_deleted: false, created_at: new Date().toISOString() },
-  { id: 'EMP-04', employee_code: 'EMP-04', employee_name: 'Kamran Shah', name: 'Kamran Shah', email: 'kamran@alkali.pk', designation: 'Helper Stitching', department: 'Stitching', department_id: 'dept-stitching', department_name: 'Stitching', base_salary: 26050, active: true, status: 'Active', is_deleted: false, created_at: new Date().toISOString() },
+  { id: 'EMP-01', employee_code: 'EMP-01', employee_name: 'Zeeshan Ali', name: 'Zeeshan Ali', email: 'zeeshan@kaprayofficial.com', designation: 'General Master Stitcher', department: 'Stitching', department_id: 'dept-stitching', department_name: 'Stitching', base_salary: 45000, active: true, status: 'Active', is_deleted: false, created_at: new Date().toISOString() },
+  { id: 'EMP-02', employee_code: 'EMP-02', employee_name: 'Muhammad Ahsan', name: 'Muhammad Ahsan', email: 'ahsan@kaprayofficial.com', designation: 'Senior Master Cutting', department: 'Cutting', department_id: 'dept-cutting', department_name: 'Cutting', base_salary: 50000, active: true, status: 'Active', is_deleted: false, created_at: new Date().toISOString() },
+  { id: 'EMP-03', employee_code: 'EMP-03', employee_name: 'Bilal Khan', name: 'Bilal Khan', email: 'bilal@kaprayofficial.com', designation: 'Finishing Supervisor', department: 'Finishing', department_id: 'dept-finishing', department_name: 'Finishing', base_salary: 32000, active: true, status: 'Active', is_deleted: false, created_at: new Date().toISOString() },
+  { id: 'EMP-04', employee_code: 'EMP-04', employee_name: 'Kamran Shah', name: 'Kamran Shah', email: 'kamran@kaprayofficial.com', designation: 'Helper Stitching', department: 'Stitching', department_id: 'dept-stitching', department_name: 'Stitching', base_salary: 26050, active: true, status: 'Active', is_deleted: false, created_at: new Date().toISOString() },
 ];
 
 export function formatSupabaseError(err: any, tableName: string): string {
@@ -1438,4 +1438,32 @@ export async function deleteAllowance(id: string): Promise<{ success: boolean; e
     return { success: false, error: formatSupabaseError(err, 'employee_allowances') };
   }
 }
+
+/**
+ * Saves a compliance audit log entry to the database.
+ */
+export async function saveAuditLog(logEntry: AuditLog): Promise<{ success: boolean; error?: string }> {
+  const supabase = getSupabaseClient();
+  if (!supabase) return { success: true };
+
+  try {
+    const { error } = await supabase.from('audit_logs').insert([{
+      id: logEntry.id || `log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      user_id: logEntry.user_id,
+      user_email: logEntry.user_email,
+      role: logEntry.role,
+      action: logEntry.action,
+      table_name: logEntry.table_name,
+      record_id: logEntry.record_id,
+      old_data: logEntry.old_data || null,
+      new_data: logEntry.new_data || null
+    }]);
+    if (error) throw error;
+    return { success: true };
+  } catch (err: any) {
+    console.error('Audit logging error:', err);
+    return { success: false, error: formatSupabaseError(err, 'audit_logs') };
+  }
+}
+
 

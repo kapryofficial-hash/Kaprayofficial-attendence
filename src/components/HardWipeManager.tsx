@@ -48,7 +48,7 @@ export function HardWipeManager({ isAdmin, onWipeComplete }: HardWipeManagerProp
         importLogs: localStorage.getItem('excel_erp_import_logs') ? JSON.parse(localStorage.getItem('excel_erp_import_logs')!) : [],
         metadata: {
           exportedAt: new Date().toISOString(),
-          system: "Al-Kali ERP Attendance Manager"
+          system: "KaprayOfficial ERP Attendance Manager"
         }
       };
 
@@ -56,7 +56,7 @@ export function HardWipeManager({ isAdmin, onWipeComplete }: HardWipeManagerProp
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `Al-Kali_Database_Backup_${new Date().toISOString().split('T')[0]}.json`;
+      link.download = `KaprayOfficial_Database_Backup_${new Date().toISOString().split('T')[0]}.json`;
       link.click();
       URL.revokeObjectURL(url);
       setSuccessMsg('Active backup exported successfully! Save this JSON securely.');

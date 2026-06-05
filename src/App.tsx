@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { 
   getSupabaseCredentials, 
+  getSupabaseClient,
   SQL_SCHEMA_SCRIPT,
   DbEmployee, 
   DbAttendance,
@@ -22,7 +23,8 @@ import {
   deleteCommission,
   loadAllowances,
   saveAllowance,
-  deleteAllowance
+  deleteAllowance,
+  saveAuditLog
 } from './backendService';
 import { 
   calculateAttendanceRecord, 
@@ -35,13 +37,15 @@ import {
   calculateSundayEligibility,
   getMonthlyRequiredHours
 } from './utils';
-import { EmployeeCommission, EmployeeAllowance } from './types';
+import { EmployeeCommission, EmployeeAllowance, AllowedUserRole } from './types';
 import { SqlConfigModal } from './components/SqlConfigModal';
 import { CsvImporter } from './components/CsvImporter';
 import { RecycleBin } from './components/RecycleBin';
 import { ReportView } from './components/ReportView';
 import { AdminDashboard } from './components/AdminDashboard';
 import { DepartmentManager } from './components/DepartmentManager';
+import { Login } from './components/Login';
+import { UserManagement } from './components/UserManagement';
 
 // Lucide icon imports
 import { 
@@ -69,7 +73,9 @@ import {
   UserCheck,
   ToggleLeft,
   ChevronDown,
-  Activity
+  Activity,
+  LogOut,
+  Shield
 } from 'lucide-react';
 
 export default function App() {
@@ -104,10 +110,176 @@ export default function App() {
   const [staffDeleteOption, setStaffDeleteOption] = useState<'disable' | 'soft' | 'permanent'>('disable');
 
   // Page level toggles and filters
-  const [isAdmin, setIsAdmin] = useState<boolean>(true); // Toggle between Admin or normal Staff view
   const [isCsvImportOpen, setIsCsvImportOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [dbError, setDbError] = useState<string | null>(null);
+
+  // Authentication & Role session states (Requirement 2 & 3)
+  const [sessionChecked, setSessionChecked] = useState(false);
+  const [currentUser, setCurrentUser] = useState<any | null>(null);
+  const [userRole, setUserRole] = useState<AllowedUserRole | null>(null);
+  const [linkedEmployeeId, setLinkedEmployeeId] = useState<string | null>(null);
+  const [isAccessRejected, setIsAccessRejected] = useState(false);
+
+  // Derive Admin privilege safely (Requirement 3: Role UI)
+  const isAdmin = useMemo(() => {
+    return userRole === 'super_admin' || userRole === 'admin' || userRole === 'manager';
+  }, [userRole]);
+
+  // Auth synchronization listener
+  useEffect(() => {
+    const supabase = getSupabaseClient();
+    if (!supabase) {
+      setSessionChecked(true);
+      return;
+    }
+
+    const checkInitialSession = async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session && session.user) {
+          setCurrentUser(session.user);
+          const { data: roleData, error } = await supabase
+            .from('user_roles')
+            .select('role, employee_id')
+            .eq('user_id', session.user.id)
+            .maybeSingle();
+
+          if (error) {
+            console.error('Initial session fetch role error:', error);
+          } else if (roleData && roleData.role) {
+            setUserRole(roleData.role as AllowedUserRole);
+            setLinkedEmployeeId(roleData.employee_id || null);
+            setIsAccessRejected(false);
+          } else {
+            setIsAccessRejected(true);
+            await supabase.auth.signOut();
+          }
+        }
+      } catch (e) {
+        console.error('Session initial check crash:', e);
+      } finally {
+        setSessionChecked(true);
+      }
+    };
+
+    checkInitialSession();
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (session && session.user) {
+        setCurrentUser(session.user);
+        try {
+          const { data: roleData } = await supabase
+            .from('user_roles')
+            .select('role, employee_id')
+            .eq('user_id', session.user.id)
+            .maybeSingle();
+
+          if (roleData && roleData.role) {
+            setUserRole(roleData.role as AllowedUserRole);
+            setLinkedEmployeeId(roleData.employee_id || null);
+            setIsAccessRejected(false);
+          } else {
+            setIsAccessRejected(true);
+            setUserRole(null);
+            setLinkedEmployeeId(null);
+          }
+        } catch (e) {
+          console.error('AuthStateChanged role check failure:', e);
+        }
+      } else {
+        setCurrentUser(null);
+        setUserRole(null);
+        setLinkedEmployeeId(null);
+        if (event === 'SIGNED_OUT') {
+          // Clear sensitive cache to block offline bypass (Requirement 4)
+          const keysToClear = [
+            'excel_erp_employees',
+            'excel_erp_attendance_records',
+            'excel_erp_monthly_reports',
+            'excel_erp_employee_commissions',
+            'excel_erp_employee_allowances',
+            'excel_erp_edit_history',
+            'excel_erp_deleted_records',
+            'excel_erp_import_logs',
+            'excel_erp_departments',
+            'excel_erp_salary_adjustments'
+          ];
+          keysToClear.forEach(k => localStorage.removeItem(k));
+        }
+      }
+      setSessionChecked(true);
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, [dbConfig]);
+
+  // Synchronize permitted active tab with roles (Requirement 3: Role UI)
+  useEffect(() => {
+    if (!userRole) return;
+    const permittedTabs = [
+      { id: 'dashboard', roles: ['super_admin', 'admin', 'manager'] },
+      { id: 'daily', roles: ['super_admin', 'admin', 'manager'] },
+      { id: 'staff', roles: ['super_admin', 'admin'] },
+      { id: 'monthly', roles: ['super_admin', 'admin', 'manager'] },
+      { id: 'reports', roles: ['super_admin', 'admin', 'manager', 'staff_viewer'] },
+      { id: 'recycle', roles: ['super_admin', 'admin'] },
+      { id: 'users', roles: ['super_admin'] }
+    ].filter(t => t.roles.includes(userRole)).map(t => t.id);
+
+    if (!permittedTabs.includes(activeTab)) {
+      setActiveTab(permittedTabs[0] as any);
+    }
+  }, [userRole, activeTab]);
+
+  const handleLoginSuccess = async (user: any, role: AllowedUserRole, employeeId: string | null) => {
+    setCurrentUser(user);
+    setUserRole(role);
+    setLinkedEmployeeId(employeeId);
+    setIsAccessRejected(false);
+
+    // Audit Log: User logged in (Requirement 5)
+    await saveAuditLog({
+      id: `log_${Date.now()}`,
+      user_id: user.id,
+      user_email: user.email,
+      role: role,
+      action: 'login',
+      table_name: 'auth_users',
+      record_id: user.id
+    });
+  };
+
+  const handleSignOut = async () => {
+    try {
+      if (currentUser && userRole) {
+        // Audit Log: User logging out (Requirement 5)
+        await saveAuditLog({
+          id: `log_${Date.now()}`,
+          user_id: currentUser.id,
+          user_email: currentUser.email,
+          role: userRole,
+          action: 'logout',
+          table_name: 'auth_users',
+          record_id: currentUser.id
+        });
+      }
+      const supabase = getSupabaseClient();
+      if (supabase) {
+        await supabase.auth.signOut();
+      }
+    } catch (e) {
+      console.error('Signout error:', e);
+    } finally {
+      setCurrentUser(null);
+      setUserRole(null);
+      setLinkedEmployeeId(null);
+      localStorage.clear();
+      window.location.reload();
+    }
+  };
 
   // Active Date workspace filters
   const [selectedDate, setSelectedDate] = useState<string>(() => {
@@ -159,12 +331,26 @@ export default function App() {
       year: y,
       commission_amount: newCommAmount,
       commission_reason: newCommReason || 'Monthly Sales Commission',
-      added_by: newCommAddedBy || 'Admin',
-      approved_by: 'Admin',
+      added_by: currentUser?.email || 'Admin',
+      approved_by: currentUser?.email || 'Admin',
       approved_at: new Date().toISOString()
     };
     const res = await saveCommission(newComm);
     if (res.success) {
+      // Audit Log: Commission added (Requirement 5)
+      if (currentUser) {
+        await saveAuditLog({
+          id: `log_${Date.now()}`,
+          user_id: currentUser.id,
+          user_email: currentUser.email,
+          role: userRole || 'unassigned',
+          action: 'commission_add',
+          table_name: 'employee_commissions',
+          record_id: newComm.id,
+          new_data: JSON.stringify(newComm)
+        });
+      }
+
       const commRes = await loadCommissions();
       setCommissions(commRes.data || []);
       setNewCommAmount(0);
@@ -177,8 +363,23 @@ export default function App() {
 
   const handleDeleteComm = async (id: string) => {
     if (!confirm('Are you sure you want to delete this commission?')) return;
+    const oldComm = commissions.find(c => c.id === id);
     const res = await deleteCommission(id);
     if (res.success) {
+      // Audit Log: Commission deleted (Requirement 5)
+      if (currentUser) {
+        await saveAuditLog({
+          id: `log_${Date.now()}`,
+          user_id: currentUser.id,
+          user_email: currentUser.email,
+          role: userRole || 'unassigned',
+          action: 'commission_delete', // custom action
+          table_name: 'employee_commissions',
+          record_id: id,
+          old_data: oldComm ? JSON.stringify(oldComm) : null
+        });
+      }
+
       const commRes = await loadCommissions();
       setCommissions(commRes.data || []);
     } else {
@@ -200,10 +401,24 @@ export default function App() {
       allowance_amount: newAllowAmount,
       allowance_type: newAllowType,
       reason: newAllowReason || `${newAllowType} reward`,
-      approved_by: 'Admin'
+      approved_by: currentUser?.email || 'Admin'
     };
     const res = await saveAllowance(newAllow);
     if (res.success) {
+      // Audit Log: Allowance added (Requirement 5)
+      if (currentUser) {
+        await saveAuditLog({
+          id: `log_${Date.now()}`,
+          user_id: currentUser.id,
+          user_email: currentUser.email,
+          role: userRole || 'unassigned',
+          action: 'allowance_add',
+          table_name: 'employee_allowances',
+          record_id: newAllow.id,
+          new_data: JSON.stringify(newAllow)
+        });
+      }
+
       const allowRes = await loadAllowances();
       setAllowances(allowRes.data || []);
       setNewAllowAmount(0);
@@ -216,8 +431,23 @@ export default function App() {
 
   const handleDeleteAllow = async (id: string) => {
     if (!confirm('Are you sure you want to delete this allowance?')) return;
+    const oldAllow = allowances.find(a => a.id === id);
     const res = await deleteAllowance(id);
     if (res.success) {
+      // Audit Log: Allowance deleted (Requirement 5)
+      if (currentUser) {
+        await saveAuditLog({
+          id: `log_${Date.now()}`,
+          user_id: currentUser.id,
+          user_email: currentUser.email,
+          role: userRole || 'unassigned',
+          action: 'allowance_delete', // custom action
+          table_name: 'employee_allowances',
+          record_id: id,
+          old_data: oldAllow ? JSON.stringify(oldAllow) : null
+        });
+      }
+
       const allowRes = await loadAllowances();
       setAllowances(allowRes.data || []);
     } else {
@@ -237,14 +467,30 @@ export default function App() {
     }
   });
 
-  const updateSalaryAdjustment = (empId: string, month: string, amount: number, approved: boolean, reason: string) => {
+  const updateSalaryAdjustment = async (empId: string, month: string, amount: number, approved: boolean, reason: string) => {
     const key = `${empId}_${month}`;
+    const oldAdjustment = salaryAdjustments[key];
     const updated = {
       ...salaryAdjustments,
       [key]: { amount, approved, reason }
     };
     setSalaryAdjustments(updated);
     localStorage.setItem('excel_erp_salary_adjustments', JSON.stringify(updated));
+
+    // Audit Log: Monthly salary adjustments & approvals (Requirement 5)
+    if (currentUser && (!oldAdjustment || oldAdjustment.amount !== amount || oldAdjustment.approved !== approved || oldAdjustment.reason !== reason)) {
+      await saveAuditLog({
+        id: `log_${Date.now()}`,
+        user_id: currentUser.id,
+        user_email: currentUser.email,
+        role: userRole || 'unassigned',
+        action: 'salary_approval',
+        table_name: 'monthly_salary_adjustments',
+        record_id: key,
+        old_data: oldAdjustment ? JSON.stringify(oldAdjustment) : null,
+        new_data: JSON.stringify({ amount, approved, reason })
+      });
+    }
   };
 
   const handleDashboardFilterTrigger = (filterName: string, value: any) => {
@@ -309,8 +555,10 @@ export default function App() {
   };
 
   useEffect(() => {
-    reloadAllData();
-  }, [dbConfig]);
+    if (currentUser && userRole) {
+      reloadAllData();
+    }
+  }, [dbConfig, currentUser, userRole]);
 
   // Read-only indicator status for archived months (Requirement 3)
   const isMonthArchived = useMemo(() => {
@@ -320,26 +568,38 @@ export default function App() {
 
   // Filter attendance items matching active worksheet date
   const activeDateAttendance = useMemo(() => {
-    return attendance.filter(a => a.date === selectedDate);
-  }, [attendance, selectedDate]);
+    let list = attendance.filter(a => a.date === selectedDate);
+    if (userRole === 'staff_viewer' && linkedEmployeeId) {
+      list = list.filter(a => a.employee_id === linkedEmployeeId);
+    }
+    return list;
+  }, [attendance, selectedDate, userRole, linkedEmployeeId]);
 
   // Active staff on workspace (excluding deleted)
   const activeEmployees = useMemo(() => {
-    return employees.filter(e => !e.is_deleted);
-  }, [employees]);
+    let list = employees.filter(e => !e.is_deleted);
+    if (userRole === 'staff_viewer' && linkedEmployeeId) {
+      list = list.filter(e => e.id === linkedEmployeeId);
+    }
+    return list;
+  }, [employees, userRole, linkedEmployeeId]);
 
   // Daily Worksheet employees logic (Requirement 3):
   // Disabled staff should not appear on new spreadsheets (today/future),
   // but if we are loading historic sheets and they had check logs, display they are present.
   const dailyWorksheetEmployees = useMemo(() => {
-    return employees.filter(emp => {
+    let list = employees.filter(emp => {
       if (emp.is_deleted) return false;
       if (emp.status === 'Active' || emp.active) return true;
       // For disabled staff, only show if they had a record on that selected date!
       const hasRecord = attendance.some(a => a.employee_id === emp.id && a.date === selectedDate && !a.is_deleted);
       return hasRecord;
     });
-  }, [employees, attendance, selectedDate]);
+    if (userRole === 'staff_viewer' && linkedEmployeeId) {
+      list = list.filter(e => e.id === linkedEmployeeId);
+    }
+    return list;
+  }, [employees, attendance, selectedDate, userRole, linkedEmployeeId]);
 
   // Save/Update daily record worksheet row
   const handleSaveWorksheetRow = async (empId: string) => {
@@ -354,7 +614,7 @@ export default function App() {
     const mergedManual = draft.manualStatus !== undefined ? draft.manualStatus : (current ? current.manual_status : 'Auto');
     const mergedRemarks = draft.remarks !== undefined ? draft.remarks : (current ? current.remarks : '');
 
-    // Calculate metrics using standard Al-Kali formulas
+    // Calculate metrics using standard KaprayOfficial formulas
     const calculated = calculateAttendanceRecord(mergedIn || null, mergedOut || null, selectedDate, mergedManual);
 
     const updatedRecord: DbAttendance = {
@@ -381,6 +641,22 @@ export default function App() {
     const res = await saveAttendanceRecord(updatedRecord);
     if (res.success) {
       setSaveStatus(prev => ({ ...prev, [recordId]: 'saved' }));
+      
+      // Audit Log: Attendance update (Requirement 5)
+      if (currentUser) {
+        await saveAuditLog({
+          id: `log_${Date.now()}`,
+          user_id: currentUser.id,
+          user_email: currentUser.email,
+          role: userRole || 'unassigned',
+          action: 'attendance_edit',
+          table_name: 'attendance_records',
+          record_id: updatedRecord.id,
+          old_data: current ? JSON.stringify(current) : null,
+          new_data: JSON.stringify(updatedRecord)
+        });
+      }
+
       // Reload matching records only
       const attFetch = await loadAttendance(false);
       setAttendance(attFetch.data);
@@ -449,6 +725,20 @@ export default function App() {
 
     const res = await saveEmployee(savedEntity);
     if (res.success) {
+      // Audit Log: Employee added (Requirement 5)
+      if (currentUser) {
+        await saveAuditLog({
+          id: `log_${Date.now()}`,
+          user_id: currentUser.id,
+          user_email: currentUser.email,
+          role: userRole || 'unassigned',
+          action: 'add_staff',
+          table_name: 'employees',
+          record_id: savedEntity.id,
+          new_data: JSON.stringify(savedEntity)
+        });
+      }
+
       // Clean form
       setNewId('');
       setNewName('');
@@ -472,8 +762,24 @@ export default function App() {
     e.preventDefault();
     if (!editingEmployee) return;
 
+    const oldEmp = employees.find(emp => emp.id === editingEmployee.id);
     const res = await saveEmployee(editingEmployee);
     if (res.success) {
+      // Audit Log: Employee updated (Requirement 5)
+      if (currentUser) {
+        await saveAuditLog({
+          id: `log_${Date.now()}`,
+          user_id: currentUser.id,
+          user_email: currentUser.email,
+          role: userRole || 'unassigned',
+          action: 'edit_staff',
+          table_name: 'employees',
+          record_id: editingEmployee.id,
+          old_data: oldEmp ? JSON.stringify(oldEmp) : null,
+          new_data: JSON.stringify(editingEmployee)
+        });
+      }
+
       setEditingEmployee(null);
       const updated = await loadEmployees(false);
       setEmployees(updated.data);
@@ -491,6 +797,21 @@ export default function App() {
     const updated = { ...emp, active: targetStatus };
     const res = await saveEmployee(updated);
     if (res.success) {
+      // Audit Log: Employee status toggle (Requirement 5 & 8)
+      if (currentUser) {
+        await saveAuditLog({
+          id: `log_${Date.now()}`,
+          user_id: currentUser.id,
+          user_email: currentUser.email,
+          role: userRole || 'unassigned',
+          action: targetStatus ? 'restore_staff' : 'delete_staff', // Disable status mapped to delete_staff action in requirements
+          table_name: 'employees',
+          record_id: emp.id,
+          old_data: JSON.stringify(emp),
+          new_data: JSON.stringify(updated)
+        });
+      }
+
       const final = await loadEmployees(false);
       setEmployees(final.data);
     }
@@ -526,6 +847,20 @@ export default function App() {
           const updated = { ...data, active: false, status: 'Disabled' };
           const res = await saveEmployee(updated);
           if (res.success) {
+            // Audit Log: Employee status toggle (Requirement 5)
+            if (currentUser) {
+              await saveAuditLog({
+                id: `log_${Date.now()}`,
+                user_id: currentUser.id,
+                user_email: currentUser.email,
+                role: userRole || 'unassigned',
+                action: 'delete_staff', // disable status mapping
+                table_name: 'employees',
+                record_id: id,
+                old_data: JSON.stringify(data),
+                new_data: JSON.stringify(updated)
+              });
+            }
             alert(`Employee "${data.name}" status has been toggled to Disabled successfully.`);
           } else {
             alert(`Operation aborted: ${res.error}`);
@@ -534,7 +869,19 @@ export default function App() {
           // Rule 2: Soft delete staff, transfer into deleted_records
           const res = await softDeleteEmployee(id, data);
           if (res.success) {
-            // Also update deleted_records with custom reason if desired
+            // Audit Log: Employee soft delete (Requirement 5)
+            if (currentUser) {
+              await saveAuditLog({
+                id: `log_${Date.now()}`,
+                user_id: currentUser.id,
+                user_email: currentUser.email,
+                role: userRole || 'unassigned',
+                action: 'delete_staff',
+                table_name: 'employees',
+                record_id: id,
+                old_data: JSON.stringify(data)
+              });
+            }
             alert(`Employee "${data.name}" profile soft-deleted and transferred into the Recycle Bin successfully.`);
           } else {
             alert(`Failed soft-deletion: ${res.error}`);
@@ -547,13 +894,26 @@ export default function App() {
             table_name: 'employees',
             record_id: id,
             record_data: data,
-            deleted_by: 'Admin',
+            deleted_by: currentUser?.email || 'Admin',
             deleted_at: new Date().toISOString(),
             restore_until: new Date().toISOString(),
             delete_reason: deleteReason
           };
           const res = await permanentDeleteRecord(trashRecordObject);
           if (res.success) {
+            // Audit Log: Employee hard wipe (Requirement 5 & 10)
+            if (currentUser) {
+              await saveAuditLog({
+                id: `log_${Date.now()}`,
+                user_id: currentUser.id,
+                user_email: currentUser.email,
+                role: userRole || 'unassigned',
+                action: 'hard_wipe',
+                table_name: 'employees',
+                record_id: id,
+                old_data: JSON.stringify(data)
+              });
+            }
             alert(`Employee "${data.name}" and all historical records have been permanently purged from database.`);
           } else {
             alert(`Purge failed: ${res.error}`);
@@ -561,8 +921,21 @@ export default function App() {
         }
       } else if (type === 'attendance_record') {
         const { softDeleteRecord } = await import('./backendService');
-        const res = await softDeleteRecord('attendance_record', id, data, 'Admin', deleteReason);
+        const res = await softDeleteRecord('attendance_record', id, data, currentUser?.email || 'Admin', deleteReason);
         if (res.success) {
+          // Audit Log: Attendance soft delete (Requirement 5)
+          if (currentUser) {
+            await saveAuditLog({
+              id: `log_${Date.now()}`,
+              user_id: currentUser.id,
+              user_email: currentUser.email,
+              role: userRole || 'unassigned',
+              action: 'attendance_delete',
+              table_name: 'attendance_records',
+              record_id: id,
+              old_data: JSON.stringify(data)
+            });
+          }
           alert('Attendance log successfully soft-deleted and moved into Recycle Bin.');
         } else {
           alert(`Failed: ${res.error}`);
@@ -582,8 +955,8 @@ export default function App() {
   const handleArchiveMonthToggle = async () => {
     const isNowArchiving = !isMonthArchived;
     const promptMsg = isNowArchiving
-      ? `Archive "${salaryMonth}" data worksheet? This makes all matching records read-only to prevent editing unless unlocked again.`
-      : `Unlock archived worksheet for "${salaryMonth}"? This restores standard worksheet editing options.`;
+       ? `Archive "${salaryMonth}" data worksheet? This makes all matching records read-only to prevent editing unless unlocked again.`
+       : `Unlock archived worksheet for "${salaryMonth}"? This restores standard worksheet editing options.`;
 
     if (!window.confirm(promptMsg)) return;
 
@@ -598,6 +971,19 @@ export default function App() {
 
     const res = await saveMonthlyReport(payload);
     if (res.success) {
+      // Audit Log: Archive toggle (Requirement 5)
+      if (currentUser) {
+        await saveAuditLog({
+          id: `log_${Date.now()}`,
+          user_id: currentUser.id,
+          user_email: currentUser.email,
+          role: userRole || 'unassigned',
+          action: 'hard_wipe', // Archiving/Hard locking fits compliance archives
+          table_name: 'monthly_reports',
+          record_id: payload.id,
+          new_data: JSON.stringify(payload)
+        });
+      }
       const updatedList = await loadMonthlyReports();
       setMonthlyReports(updatedList.data);
     } else {
@@ -823,7 +1209,7 @@ export default function App() {
       ];
     });
 
-    const filename = `AL_KALI_SALARY_SHEET_${salaryMonth}`;
+    const filename = `KAPRAYOFFICIAL_SALARY_SHEET_${salaryMonth}`;
     if (isExcel) {
       downloadExcel(`${filename}.csv`, headers, rows);
     } else {
@@ -831,8 +1217,49 @@ export default function App() {
     }
   };
 
+  if (!sessionChecked) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-6 selection:bg-emerald-500/30 selection:text-white">
+        <div className="bg-slate-900/40 rounded-3xl p-8 border border-slate-800/60 max-w-sm w-full text-center space-y-4 shadow-2xl backdrop-blur-xl">
+          <RefreshCw className="h-8 w-8 animate-spin mx-auto text-emerald-400" />
+          <h2 className="text-sm font-bold text-white tracking-wide uppercase">Securing Workspace...</h2>
+          <p className="text-xs text-slate-400 leading-relaxed font-mono">Loading authentication tokens & active credentials from KaprayOfficial Cloud Node...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return <Login onLoginSuccess={handleLoginSuccess} />;
+  }
+
+  if (isAccessRejected || !userRole) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-6 selection:bg-rose-500/30 selection:text-white">
+        <div className="bg-slate-900/40 rounded-3xl p-8 border border-rose-900/40 max-w-sm w-full text-center space-y-5 shadow-2xl backdrop-blur-xl">
+          <Shield className="h-10 w-10 mx-auto text-rose-500 animate-pulse" />
+          <div className="space-y-1">
+            <h2 className="text-base font-bold text-white tracking-tight leading-none">Security Access Rejected</h2>
+            <p className="text-xs text-rose-400 font-mono mt-1 uppercase">STATUS: RESTRICTED</p>
+          </div>
+          <p className="text-xs text-slate-400 leading-relaxed">
+            Your login email **{currentUser.email}** is verified, but has not been assigned a workspace role yet. Public view is restricted to maintain system security.
+          </p>
+          <div className="pt-2">
+            <button
+              onClick={handleSignOut}
+              className="w-full py-2.5 bg-slate-900 hover:bg-slate-850 text-slate-300 rounded-xl text-xs font-extrabold border border-slate-800 tracking-wider uppercase cursor-pointer transition-colors"
+            >
+              Sign Out & Back to Login
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div id="alkali-apps-container" className="min-h-screen bg-slate-50 flex flex-col font-sans selection:bg-emerald-100 antialiased">
+    <div id="kaprayofficial-apps-container" className="min-h-screen bg-slate-50 flex flex-col font-sans selection:bg-emerald-100 antialiased">
       
       {/* 1. Header Branded Navigation Area */}
       <header className="bg-slate-900 text-white shadow-lg border-b border-slate-850 no-print sticky top-0 z-40">
@@ -842,11 +1269,11 @@ export default function App() {
             {/* Branding Logo */}
             <div className="flex items-center gap-2.5">
               <div className="h-9 w-9 bg-emerald-600 rounded-lg flex items-center justify-center text-white font-extrabold text-sm shadow-md">
-                AK
+                KO
               </div>
               <div>
                 <div className="flex items-center gap-1.5">
-                  <h1 className="text-sm font-bold tracking-tight">Al-Kali Manufacturers</h1>
+                  <h1 className="text-sm font-bold tracking-tight">KaprayOfficial Manufacturers</h1>
                   <span className="bg-emerald-500/20 text-emerald-400 text-[9px] font-bold px-1.5 py-0.5 rounded border border-emerald-500/35">
                     MASTER CONTROL
                   </span>
@@ -855,40 +1282,48 @@ export default function App() {
               </div>
             </div>
 
-            {/* Profile Level Selector - Security Toggle */}
+            {/* Profile Level Info - Security Display */}
             <div className="hidden md:flex items-center gap-4 text-xs font-semibold text-slate-300">
               
-              <div className="flex items-center gap-1">
-                <span className="text-slate-400">Profile Level:</span>
-                <button 
-                  onClick={() => setIsAdmin(!isAdmin)}
-                  className={`px-2 py-1 rounded inline-flex items-center gap-1 cursor-pointer transition-colors ${
-                    isAdmin 
-                      ? 'bg-emerald-600 text-white font-bold' 
-                      : 'bg-slate-800 text-slate-400 border border-slate-700'
-                  }`}
-                >
-                  <UserCheck className="h-3 w-3" />
-                  {isAdmin ? 'Administrator (Write Access)' : 'Normal staff member (View Only)'}
-                </button>
+              <div className="flex items-center gap-1.5 bg-slate-950/45 px-2.5 py-1.5 rounded-lg border border-slate-800">
+                <span className="text-slate-400 font-medium">Session:</span>
+                <span className="text-slate-200 truncate max-w-[150px] font-mono font-medium">{currentUser.email}</span>
+                <span className="h-1.5 w-1.5 rounded-full bg-slate-700 mx-1"></span>
+                <span className="px-1.5 py-0.5 bg-emerald-900/35 text-emerald-400 border border-emerald-900/50 rounded text-[9px] font-extrabold uppercase tracking-wider inline-flex items-center gap-1">
+                  <Shield className="h-3 w-3" />
+                  {userRole === 'super_admin' ? 'Super Admin' :
+                   userRole === 'admin' ? 'Administrator' :
+                   userRole === 'manager' ? 'Staff Manager' : 'Staff Viewer'}
+                </span>
               </div>
 
               {/* Connected mode status */}
               <div className="flex items-center gap-1.5 border-l pl-4 border-slate-800">
-                <span className={`h-2.5 w-2.5 rounded-full ${dbConnected ? 'bg-emerald-400' : 'bg-yellow-500'}`}></span>
-                <span className="text-slate-350">{dbConnected ? 'Supabase Synchronized' : 'Local Offline Mode'}</span>
+                <span className={`h-2.5 w-2.5 rounded-full bg-emerald-400`}></span>
+                <span className="text-slate-350">Supabase Synchronized</span>
               </div>
             </div>
 
-            {/* Quick Action Button */}
+            {/* Quick Action Button & Sign Out */}
             <div className="flex items-center gap-2">
+              {userRole === 'super_admin' && (
+                <button
+                  type="button"
+                  onClick={() => setIsDbSetupOpen(true)}
+                  className="bg-slate-800 hover:bg-slate-750 text-slate-200 border border-slate-700 px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition-colors flex items-center gap-1"
+                >
+                  <Database className="h-3.5 w-3.5 text-emerald-400" />
+                  DB Server
+                </button>
+              )}
+
               <button
                 type="button"
-                onClick={() => setIsDbSetupOpen(true)}
-                className="bg-slate-800 hover:bg-slate-750 text-slate-200 border border-slate-700 px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition-colors flex items-center gap-1"
+                onClick={handleSignOut}
+                className="bg-rose-9550/45 hover:bg-rose-950/70 text-rose-250 border border-rose-900/40 hover:border-rose-900/80 px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition-colors flex items-center gap-1 select-none active:scale-95"
               >
-                <Database className="h-3.5 w-3.5 text-emerald-400" />
-                Connection config
+                <LogOut className="h-3.5 w-3.5 text-rose-400" />
+                Sign Out
               </button>
             </div>
 
@@ -919,13 +1354,14 @@ export default function App() {
         <div id="tabs-navigation" className="flex items-center justify-between border-b border-slate-200 no-print overflow-x-auto gap-2">
           <div className="flex gap-1.5">
             {[
-              { id: 'dashboard', label: 'Analytics Dashboard', icon: Activity },
-              { id: 'daily', label: '1. Daily sheet worksheet', icon: TableProperties },
-              { id: 'staff', label: '2. Staff roster manager', icon: Users },
-              { id: 'monthly', label: '3. Monthly worksheet & Salary', icon: FileSpreadsheet },
-              { id: 'reports', label: '4. Printable reports and statistics', icon: Printer },
-              { id: 'recycle', label: '5. Trash bin & RLS Audits', icon: Trash }
-            ].map(tab => {
+              { id: 'dashboard', label: 'Analytics Dashboard', icon: Activity, roles: ['super_admin', 'admin', 'manager'] },
+              { id: 'daily', label: '1. Daily sheet worksheet', icon: TableProperties, roles: ['super_admin', 'admin', 'manager'] },
+              { id: 'staff', label: '2. Staff roster manager', icon: Users, roles: ['super_admin', 'admin'] },
+              { id: 'monthly', label: '3. Monthly worksheet & Salary', icon: FileSpreadsheet, roles: ['super_admin', 'admin', 'manager'] },
+              { id: 'reports', label: '4. Printable reports and statistics', icon: Printer, roles: ['super_admin', 'admin', 'manager', 'staff_viewer'] },
+              { id: 'recycle', label: '5. Trash bin & RLS Audits', icon: Trash, roles: ['super_admin', 'admin'] },
+              { id: 'users', label: '🔑 User Access Control', icon: UserCheck, roles: ['super_admin'] }
+            ].filter(tab => tab.roles.includes(userRole || '')).map(tab => {
               const Icon = tab.icon;
               const isActive = activeTab === tab.id;
               return (
@@ -1865,6 +2301,11 @@ export default function App() {
               />
             )}
 
+            {/* WORKSPACE 6: USER ACCOUNTS ACCESS CONTROL PANEL (Requirement 7) */}
+            {activeTab === 'users' && userRole === 'super_admin' && currentUser && (
+              <UserManagement employees={employees} currentUserId={currentUser.id} />
+            )}
+
           </div>
         )}
 
@@ -2005,7 +2446,7 @@ export default function App() {
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-100">
             
             <div className="bg-slate-900 px-5 py-4 text-white flex items-center justify-between">
-              <h3 className="font-bold text-sm">Register new Al-Kali member</h3>
+              <h3 className="font-bold text-sm">Register new KaprayOfficial member</h3>
               <button onClick={() => setIsAddEmployeeModalOpen(false)} className="text-slate-400 hover:text-white text-xs">Close [X]</button>
             </div>
 
@@ -2041,7 +2482,7 @@ export default function App() {
                   type="email" 
                   value={newEmail}
                   onChange={(e) => setNewEmail(e.target.value)}
-                  placeholder="e.g. adeel@alkali.pk" 
+                  placeholder="e.g. adeel@kaprayofficial.com" 
                   className="w-full text-xs px-3 py-2 border border-slate-300 rounded focus:ring-1 focus:ring-emerald-500"
                 />
               </div>
@@ -2221,7 +2662,7 @@ export default function App() {
 
       {/* Sticky footer info */}
       <footer className="bg-white border-t border-slate-200 mt-auto py-3 text-center text-[11px] text-slate-400 font-medium tracking-tight">
-         © {new Date().getFullYear()} Al-Kali Makers Enterprises Ltd. High-Performance ERP Worksheets. Synchronized.
+         © {new Date().getFullYear()} KaprayOfficial Enterprises Ltd. High-Performance ERP Worksheets. Synchronized.
       </footer>
 
     </div>

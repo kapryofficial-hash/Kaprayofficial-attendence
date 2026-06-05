@@ -440,7 +440,7 @@ export function ReportView({ employees, attendance, initialFilters, onClearIniti
   const handleExportData = (isExcel: boolean) => {
     const activeM = filterMonth || '06';
     const activeY = filterYear || '2026';
-    const filename = `alkali_${activeSubTab}_report_${activeY}_${activeM}`;
+    const filename = `kaprayofficial_${activeSubTab}_report_${activeY}_${activeM}`;
 
     if (activeSubTab === 'daily') {
       const headers = [
@@ -839,7 +839,7 @@ export function ReportView({ employees, attendance, initialFilters, onClearIniti
         {/* Document Header Panel */}
         <div className="p-5 border-b border-slate-200 flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
-            <div className="text-emerald-700 font-bold text-xs uppercase tracking-widest leading-none mb-1">AL-KALI MANUFACTURE</div>
+            <div className="text-emerald-700 font-bold text-xs uppercase tracking-widest leading-none mb-1">KAPRAYOFFICIAL</div>
             <h3 className="text-slate-900 font-bold text-base flex items-center gap-1.5">
               <FileText className="h-5 w-5 text-emerald-600" />
               {activeSubTab === 'daily' 
