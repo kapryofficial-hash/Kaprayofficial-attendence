@@ -133,6 +133,16 @@ export interface UserProfileRole {
   updated_at?: string;
 }
 
+export interface UserProfile {
+  user_id: string; // UUID from auth.users
+  username: string; // unique
+  display_name: string | null;
+  role: AllowedUserRole;
+  email: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
 export interface AuditLog {
   id: string;
   user_id: string | null;

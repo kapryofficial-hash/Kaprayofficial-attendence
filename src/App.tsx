@@ -37,7 +37,7 @@ import {
   calculateSundayEligibility,
   getMonthlyRequiredHours
 } from './utils';
-import { EmployeeCommission, EmployeeAllowance, AllowedUserRole } from './types';
+import { EmployeeCommission, EmployeeAllowance, AllowedUserRole, UserProfile } from './types';
 import { SqlConfigModal } from './components/SqlConfigModal';
 import { CsvImporter } from './components/CsvImporter';
 import { RecycleBin } from './components/RecycleBin';
@@ -117,9 +117,11 @@ export default function App() {
   // Authentication & Role session states (Requirement 2 & 3)
   const [sessionChecked, setSessionChecked] = useState(false);
   const [currentUser, setCurrentUser] = useState<any | null>(null);
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [userRole, setUserRole] = useState<AllowedUserRole | null>(null);
   const [linkedEmployeeId, setLinkedEmployeeId] = useState<string | null>(null);
   const [isAccessRejected, setIsAccessRejected] = useState(false);
+  const [isRoleLoading, setIsRoleLoading] = useState(false);
 
   // Derive Admin privilege safely (Requirement 3: Role UI)
   const isAdmin = useMemo(() => {
@@ -139,17 +141,56 @@ export default function App() {
         const { data: { session } } = await supabase.auth.getSession();
         if (session && session.user) {
           setCurrentUser(session.user);
-          const { data: roleData, error } = await supabase
-            .from('user_roles')
-            .select('role, employee_id')
-            .eq('user_id', session.user.id)
-            .maybeSingle();
+          setIsRoleLoading(true);
+          
+          // Fetch profiles and user_roles in parallel, catch any potential queries issues safely
+          let profileData = null;
+          let roleData = null;
+          try {
+            const [profileRes, roleRes] = await Promise.all([
+              supabase.from('profiles').select('*').eq('user_id', session.user.id).maybeSingle(),
+              supabase.from('user_roles').select('role, employee_id').eq('user_id', session.user.id).maybeSingle()
+            ]);
+            profileData = profileRes.data;
+            roleData = roleRes.data;
 
-          if (error) {
-            console.error('Initial session fetch role error:', error);
-          } else if (roleData && roleData.role) {
-            setUserRole(roleData.role as AllowedUserRole);
-            setLinkedEmployeeId(roleData.employee_id || null);
+            if (profileRes.error) console.warn('Profiles query error:', profileRes.error);
+            if (roleRes.error) console.warn('User roles query error:', roleRes.error);
+          } catch (queryErr) {
+            console.error('Initial session check DB scan failed safely:', queryErr);
+          }
+
+          let activeRole: string | null = null;
+          let activeEmployeeId: string | null = null;
+
+          if (roleData?.role === 'super_admin' || profileData?.role === 'super_admin') {
+            activeRole = 'super_admin';
+            activeEmployeeId = null; // Do not require employee_id for super_admin
+          } else {
+            activeRole = roleData?.role || profileData?.role || null;
+            activeEmployeeId = roleData?.employee_id || null;
+          }
+
+          const isAllowed = (activeRole === 'super_admin' || roleData?.role === 'super_admin' || profileData?.role === 'super_admin');
+          const finalAccessDecision = isAllowed ? 'ALLOW' : (activeRole ? `ALLOW (${activeRole})` : 'DENY');
+
+          console.log('--- SESSION ACCESS GUARD EVALUATION ---');
+          console.log('auth user id:', session.user.id);
+          console.log('profile role:', profileData?.role || 'none');
+          console.log('user_roles role:', roleData?.role || 'none');
+          console.log('final access decision:', finalAccessDecision);
+          console.log('--------------------------------------');
+
+          if (profileData) {
+            setUserProfile(profileData as UserProfile);
+          } else {
+            setUserProfile(null);
+          }
+
+          if (isAllowed || activeRole) {
+            const roleToUse = isAllowed ? 'super_admin' : activeRole;
+            setUserRole(roleToUse as AllowedUserRole);
+            setLinkedEmployeeId(activeEmployeeId);
             setIsAccessRejected(false);
           } else {
             setIsAccessRejected(true);
@@ -159,6 +200,7 @@ export default function App() {
       } catch (e) {
         console.error('Session initial check crash:', e);
       } finally {
+        setIsRoleLoading(false);
         setSessionChecked(true);
       }
     };
@@ -168,16 +210,56 @@ export default function App() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       if (session && session.user) {
         setCurrentUser(session.user);
+        setIsRoleLoading(true);
         try {
-          const { data: roleData } = await supabase
-            .from('user_roles')
-            .select('role, employee_id')
-            .eq('user_id', session.user.id)
-            .maybeSingle();
+          // Fetch profiles and user_roles in parallel, catch queries issues safely
+          let profileData = null;
+          let roleData = null;
+          try {
+            const [profileRes, roleRes] = await Promise.all([
+              supabase.from('profiles').select('*').eq('user_id', session.user.id).maybeSingle(),
+              supabase.from('user_roles').select('role, employee_id').eq('user_id', session.user.id).maybeSingle()
+            ]);
+            profileData = profileRes.data;
+            roleData = roleRes.data;
 
-          if (roleData && roleData.role) {
-            setUserRole(roleData.role as AllowedUserRole);
-            setLinkedEmployeeId(roleData.employee_id || null);
+            if (profileRes.error) console.warn('Profiles query error:', profileRes.error);
+            if (roleRes.error) console.warn('User roles query error:', roleRes.error);
+          } catch (queryErr) {
+            console.error('Auth state change DB scan failed safely:', queryErr);
+          }
+
+          let activeRole: string | null = null;
+          let activeEmployeeId: string | null = null;
+
+          if (roleData?.role === 'super_admin' || profileData?.role === 'super_admin') {
+            activeRole = 'super_admin';
+            activeEmployeeId = null; // Do not require employee_id for super_admin
+          } else {
+            activeRole = roleData?.role || profileData?.role || null;
+            activeEmployeeId = roleData?.employee_id || null;
+          }
+
+          const isAllowed = (activeRole === 'super_admin' || roleData?.role === 'super_admin' || profileData?.role === 'super_admin');
+          const finalAccessDecision = isAllowed ? 'ALLOW' : (activeRole ? `ALLOW (${activeRole})` : 'DENY');
+
+          console.log('--- AUTH CHANGE ACCESS GUARD EVALUATION ---');
+          console.log('auth user id:', session.user.id);
+          console.log('profile role:', profileData?.role || 'none');
+          console.log('user_roles role:', roleData?.role || 'none');
+          console.log('final access decision:', finalAccessDecision);
+          console.log('-------------------------------------------');
+
+          if (profileData) {
+            setUserProfile(profileData as UserProfile);
+          } else {
+            setUserProfile(null);
+          }
+
+          if (isAllowed || activeRole) {
+            const roleToUse = isAllowed ? 'super_admin' : activeRole;
+            setUserRole(roleToUse as AllowedUserRole);
+            setLinkedEmployeeId(activeEmployeeId);
             setIsAccessRejected(false);
           } else {
             setIsAccessRejected(true);
@@ -186,29 +268,41 @@ export default function App() {
           }
         } catch (e) {
           console.error('AuthStateChanged role check failure:', e);
+        } finally {
+          setIsRoleLoading(false);
+          setSessionChecked(true);
         }
       } else {
         setCurrentUser(null);
+        setUserProfile(null);
         setUserRole(null);
         setLinkedEmployeeId(null);
+        setIsRoleLoading(false);
+        setSessionChecked(true);
         if (event === 'SIGNED_OUT') {
-          // Clear sensitive cache to block offline bypass (Requirement 4)
-          const keysToClear = [
-            'excel_erp_employees',
-            'excel_erp_attendance_records',
-            'excel_erp_monthly_reports',
-            'excel_erp_employee_commissions',
-            'excel_erp_employee_allowances',
-            'excel_erp_edit_history',
-            'excel_erp_deleted_records',
-            'excel_erp_import_logs',
-            'excel_erp_departments',
-            'excel_erp_salary_adjustments'
-          ];
-          keysToClear.forEach(k => localStorage.removeItem(k));
+          // Clear all localStorage and sessionStorage keys containing 'role', 'profile', 'auth', 'administrator', 'workspace', 'access'
+          const targetSubstrings = ['role', 'profile', 'auth', 'administrator', 'workspace', 'access'];
+          try {
+            const keysFromLocal = Object.keys(localStorage);
+            keysFromLocal.forEach(k => {
+              const lower = k.toLowerCase();
+              if (targetSubstrings.some(sub => lower.includes(sub))) {
+                localStorage.removeItem(k);
+              }
+            });
+
+            const keysFromSession = Object.keys(sessionStorage);
+            keysFromSession.forEach(k => {
+              const lower = k.toLowerCase();
+              if (targetSubstrings.some(sub => lower.includes(sub))) {
+                sessionStorage.removeItem(k);
+              }
+            });
+          } catch (cacheErr) {
+            console.warn('Cache clear on signout failed safely:', cacheErr);
+          }
         }
       }
-      setSessionChecked(true);
     });
 
     return () => {
@@ -223,7 +317,7 @@ export default function App() {
       { id: 'dashboard', roles: ['super_admin', 'admin', 'manager'] },
       { id: 'daily', roles: ['super_admin', 'admin', 'manager'] },
       { id: 'staff', roles: ['super_admin', 'admin'] },
-      { id: 'monthly', roles: ['super_admin', 'admin', 'manager'] },
+      { id: 'monthly', roles: ['super_admin', 'admin'] },
       { id: 'reports', roles: ['super_admin', 'admin', 'manager', 'staff_viewer'] },
       { id: 'recycle', roles: ['super_admin', 'admin'] },
       { id: 'users', roles: ['super_admin'] }
@@ -1217,7 +1311,7 @@ export default function App() {
     }
   };
 
-  if (!sessionChecked) {
+  if (!sessionChecked || isRoleLoading) {
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center p-6 selection:bg-emerald-500/30 selection:text-white">
         <div className="bg-slate-900/40 rounded-3xl p-8 border border-slate-800/60 max-w-sm w-full text-center space-y-4 shadow-2xl backdrop-blur-xl">
@@ -1286,8 +1380,10 @@ export default function App() {
             <div className="hidden md:flex items-center gap-4 text-xs font-semibold text-slate-300">
               
               <div className="flex items-center gap-1.5 bg-slate-950/45 px-2.5 py-1.5 rounded-lg border border-slate-800">
-                <span className="text-slate-400 font-medium">Session:</span>
-                <span className="text-slate-200 truncate max-w-[150px] font-mono font-medium">{currentUser.email}</span>
+                <span className="text-slate-400 font-medium">Logged in as:</span>
+                <span className="text-slate-200 truncate max-w-[200px] font-mono font-medium">
+                  {userProfile?.username || currentUser.email}
+                </span>
                 <span className="h-1.5 w-1.5 rounded-full bg-slate-700 mx-1"></span>
                 <span className="px-1.5 py-0.5 bg-emerald-900/35 text-emerald-400 border border-emerald-900/50 rounded text-[9px] font-extrabold uppercase tracking-wider inline-flex items-center gap-1">
                   <Shield className="h-3 w-3" />
@@ -1357,7 +1453,7 @@ export default function App() {
               { id: 'dashboard', label: 'Analytics Dashboard', icon: Activity, roles: ['super_admin', 'admin', 'manager'] },
               { id: 'daily', label: '1. Daily sheet worksheet', icon: TableProperties, roles: ['super_admin', 'admin', 'manager'] },
               { id: 'staff', label: '2. Staff roster manager', icon: Users, roles: ['super_admin', 'admin'] },
-              { id: 'monthly', label: '3. Monthly worksheet & Salary', icon: FileSpreadsheet, roles: ['super_admin', 'admin', 'manager'] },
+              { id: 'monthly', label: '3. Monthly worksheet & Salary', icon: FileSpreadsheet, roles: ['super_admin', 'admin'] },
               { id: 'reports', label: '4. Printable reports and statistics', icon: Printer, roles: ['super_admin', 'admin', 'manager', 'staff_viewer'] },
               { id: 'recycle', label: '5. Trash bin & RLS Audits', icon: Trash, roles: ['super_admin', 'admin'] },
               { id: 'users', label: '🔑 User Access Control', icon: UserCheck, roles: ['super_admin'] }

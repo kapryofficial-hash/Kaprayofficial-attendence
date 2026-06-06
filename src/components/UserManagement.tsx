@@ -25,6 +25,8 @@ export function UserManagement({ employees, currentUserId }: UserManagementProps
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [newUserId, setNewUserId] = useState('');
   const [newEmail, setNewEmail] = useState('');
+  const [newUsername, setNewUsername] = useState('');
+  const [newDisplayName, setNewDisplayName] = useState('');
   const [newRole, setNewRole] = useState<AllowedUserRole>('staff_viewer');
   const [newEmpId, setNewEmpId] = useState<string>('');
 
@@ -32,6 +34,8 @@ export function UserManagement({ employees, currentUserId }: UserManagementProps
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editRole, setEditRole] = useState<AllowedUserRole>('staff_viewer');
   const [editEmpId, setEditEmpId] = useState<string>('');
+  const [editUsername, setEditUsername] = useState('');
+  const [editDisplayName, setEditDisplayName] = useState('');
 
   const loadUserRoles = async () => {
     setLoading(true);
@@ -40,13 +44,59 @@ export function UserManagement({ employees, currentUserId }: UserManagementProps
       const supabase = getSupabaseClient();
       if (!supabase) throw new Error('Supabase Client not active.');
 
-      const { data, error } = await supabase
-        .from('user_roles')
-        .select('*')
-        .order('created_at', { ascending: false });
+      // Load BOTH tables in parallel
+      const [rolesRes, profilesRes] = await Promise.all([
+        supabase.from('user_roles').select('*'),
+        supabase.from('profiles').select('*')
+      ]);
 
-      if (error) throw error;
-      setUserRoles(data || []);
+      if (rolesRes.error) throw rolesRes.error;
+      const rList = rolesRes.data || [];
+      const pList = profilesRes.data || [];
+
+      // Combine both lists using client-side integration
+      const combined: any[] = [];
+
+      rList.forEach(roleRow => {
+        const profile = pList.find(p => p.user_id === roleRow.user_id);
+        combined.push({
+          id: roleRow.id,
+          user_id: roleRow.user_id,
+          email: profile?.email || roleRow.email || 'N/A',
+          username: profile?.username || 'N/A',
+          display_name: profile?.display_name || 'N/A',
+          role: roleRow.role,
+          employee_id: roleRow.employee_id,
+          created_at: roleRow.created_at,
+          hasProfile: !!profile
+        });
+      });
+
+      // Include profiles that may have been created first (edge case safety)
+      pList.forEach(profileRow => {
+        if (!combined.some(c => c.user_id === profileRow.user_id)) {
+          combined.push({
+            id: `profile_${profileRow.user_id}`,
+            user_id: profileRow.user_id,
+            email: profileRow.email,
+            username: profileRow.username,
+            display_name: profileRow.display_name || 'N/A',
+            role: profileRow.role,
+            employee_id: null,
+            created_at: profileRow.created_at,
+            hasProfile: true
+          });
+        }
+      });
+
+      // Sort alphabetically by username or email
+      combined.sort((a, b) => {
+        const nameA = (a.username || a.email || '').toLowerCase();
+        const nameB = (b.username || b.email || '').toLowerCase();
+        return nameA.localeCompare(nameB);
+      });
+
+      setUserRoles(combined);
     } catch (err: any) {
       setErrorText(err.message || 'Failed to fetch user roles database.');
     } finally {
@@ -60,14 +110,16 @@ export function UserManagement({ employees, currentUserId }: UserManagementProps
 
   const handleCreateRole = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newUserId || !newEmail || !newRole) {
-      setErrorText('Please fill in User Authentication UUID, Email, and pick a design role.');
+    if (!newUserId || !newEmail || !newRole || !newUsername) {
+      setErrorText('Please fill in User Authentication UUID, Email, Username, and pick a design role.');
       return;
     }
 
     // Safety checks
     const cleanUserId = newUserId.trim();
     const cleanEmail = newEmail.trim().toLowerCase();
+    const cleanUsername = newUsername.trim().toLowerCase();
+    const cleanDisplayName = newDisplayName.trim();
 
     setErrorText(null);
     setSuccessMsg(null);
@@ -78,28 +130,49 @@ export function UserManagement({ employees, currentUserId }: UserManagementProps
 
       const cleanEmployeeId = newRole === 'staff_viewer' && newEmpId ? newEmpId : null;
 
-      const newRoleRow = {
-        id: `role_${Date.now()}`,
-        user_id: cleanUserId,
-        role: newRole,
-        employee_id: cleanEmployeeId,
-        // Since we may not have helper columns, we can attach info or write it.
-        // We will store mapping row securely
-      };
+      // 1. Verify username uniqueness at the frontend
+      const { data: existingProfile, error: checkErr } = await supabase
+        .from('profiles')
+        .select('username')
+        .eq('username', cleanUsername)
+        .maybeSingle();
 
-      const { error } = await supabase
+      if (checkErr) throw checkErr;
+      if (existingProfile) {
+        throw new Error(`Username "${cleanUsername}" is already taken. Please type a different unique username.`);
+      }
+
+      // 2. Insert into profiles (will trigger automatic sync in DB due to trigger function)
+      const { error: profileErr } = await supabase
+        .from('profiles')
+        .insert([{
+          user_id: cleanUserId,
+          username: cleanUsername,
+          display_name: cleanDisplayName || null,
+          role: newRole,
+          email: cleanEmail
+        }]);
+
+      if (profileErr) throw profileErr;
+
+      // 3. Since employee_id is stored on user_roles, update user_roles explicitly to include linked employee
+      const { error: roleErr } = await supabase
         .from('user_roles')
-        .insert([newRoleRow]);
+        .upsert([{
+          id: `role_${Date.now()}`,
+          user_id: cleanUserId,
+          role: newRole,
+          employee_id: cleanEmployeeId
+        }], { onConflict: 'user_id' });
 
-      if (error) throw error;
-
-      // Log action to audit logs if possible (will handle on parent level or directly)
-      setSuccessMsg(`Provisioned role map successfully for user email ${cleanEmail}!`);
+      setSuccessMsg(`Provisioned role map and profiles successfully for "${cleanUsername}"!`);
       setIsAddOpen(false);
       
       // Clear fields
       setNewUserId('');
       setNewEmail('');
+      setNewUsername('');
+      setNewDisplayName('');
       setNewRole('staff_viewer');
       setNewEmpId('');
 
@@ -107,38 +180,70 @@ export function UserManagement({ employees, currentUserId }: UserManagementProps
       await loadUserRoles();
 
     } catch (err: any) {
-      setErrorText(err.message || 'Creation of role map failed in DB.');
+      setErrorText(err.message || 'Creation of connection mapping failed in database.');
     }
   };
 
-  const handleStartEdit = (roleRow: UserProfileRole) => {
-    setEditingId(roleRow.id);
-    setEditRole(roleRow.role);
-    setEditEmpId(roleRow.employee_id || '');
+  const handleStartEdit = (row: any) => {
+    setEditingId(row.id);
+    setEditRole(row.role);
+    setEditEmpId(row.employee_id || '');
+    setEditUsername(row.username !== 'N/A' ? row.username : '');
+    setEditDisplayName(row.display_name !== 'N/A' ? row.display_name : '');
   };
 
-  const handleSaveEdit = async (id: string) => {
+  const handleSaveEdit = async (row: any) => {
     setErrorText(null);
     setSuccessMsg(null);
+
+    const cleanUsername = editUsername.trim().toLowerCase();
+    const cleanDisplayName = editDisplayName.trim();
+    const cleanEmployeeId = editRole === 'staff_viewer' && editEmpId ? editEmpId : null;
 
     try {
       const supabase = getSupabaseClient();
       if (!supabase) throw new Error('Supabase client offline.');
 
-      const cleanEmployeeId = editRole === 'staff_viewer' && editEmpId ? editEmpId : null;
+      // 1. Verify username uniqueness if it changed
+      if (cleanUsername !== row.username) {
+        const { data: existingProfile, error: checkErr } = await supabase
+          .from('profiles')
+          .select('username')
+          .eq('username', cleanUsername)
+          .maybeSingle();
 
-      const { error } = await supabase
+        if (checkErr) throw checkErr;
+        if (existingProfile) {
+          throw new Error(`Username "${cleanUsername}" is already taken.`);
+        }
+      }
+
+      // 2. Update profiles table
+      const { error: profileErr } = await supabase
+        .from('profiles')
+        .update({
+          username: cleanUsername,
+          display_name: cleanDisplayName || null,
+          role: editRole,
+          updated_at: new Date().toISOString()
+        })
+        .eq('user_id', row.user_id);
+
+      if (profileErr) throw profileErr;
+
+      // 3. Update user_roles table
+      const { error: roleErr } = await supabase
         .from('user_roles')
         .update({
           role: editRole,
           employee_id: cleanEmployeeId,
           updated_at: new Date().toISOString()
         })
-        .eq('id', id);
+        .eq('user_id', row.user_id);
 
-      if (error) throw error;
+      if (roleErr) throw roleErr;
 
-      setSuccessMsg('UserProfile mapping role rules updated successfully!');
+      setSuccessMsg('UserProfile and permissions configuration updated successfully!');
       setEditingId(null);
       await loadUserRoles();
     } catch (err: any) {
@@ -146,13 +251,13 @@ export function UserManagement({ employees, currentUserId }: UserManagementProps
     }
   };
 
-  const handleDeleteRole = async (id: string, userId: string) => {
-    if (userId === currentUserId) {
+  const handleDeleteRole = async (row: any) => {
+    if (row.user_id === currentUserId) {
       setErrorText('Safety guard: You cannot delete your own Super Admin access profile.');
       return;
     }
 
-    if (!confirm('Are you absolutely certain you want to remove access for this user mapping row? They will lose all database communication permissions immediately.')) {
+    if (!confirm(`Are you absolutely certain you want to revoke access and delete the profile for username "${row.username}"? They will lose all permissions immediately.`)) {
       return;
     }
 
@@ -163,22 +268,24 @@ export function UserManagement({ employees, currentUserId }: UserManagementProps
       const supabase = getSupabaseClient();
       if (!supabase) throw new Error('Supabase client offline.');
 
-      const { error } = await supabase
-        .from('user_roles')
-        .delete()
-        .eq('id', id);
+      // Delete from BOTH tables
+      const [roleDel, profileDel] = await Promise.all([
+        supabase.from('user_roles').delete().eq('user_id', row.user_id),
+        supabase.from('profiles').delete().eq('user_id', row.user_id)
+      ]);
 
-      if (error) throw error;
+      if (roleDel.error) throw roleDel.error;
+      if (profileDel.error) throw profileDel.error;
 
-      setSuccessMsg('User access revoked and permission mapping deleted!');
+      setSuccessMsg(`User sequence deleted and access revoked for "${row.username}"!`);
       await loadUserRoles();
     } catch (err: any) {
-      setErrorText(err.message || 'Failed to delete role map row.');
+      setErrorText(err.message || 'Failed to delete role and profile mapping row.');
     }
   };
 
   const filteredRoles = userRoles.filter(item => {
-    const textStr = `${item.user_id} ${item.role} ${item.employee_id || ''}`.toLowerCase();
+    const textStr = `${item.user_id} ${item.role} ${item.username || ''} ${item.display_name || ''} ${item.email || ''}`.toLowerCase();
     return textStr.includes(searchTerm.toLowerCase());
   });
 
@@ -271,6 +378,29 @@ export function UserManagement({ employees, currentUserId }: UserManagementProps
               </div>
 
               <div>
+                <label className="block text-xs font-bold text-slate-600 mb-1">System Username (Unique, letters/numbers only) *</label>
+                <input 
+                  type="text"
+                  required
+                  value={newUsername}
+                  onChange={(e) => setNewUsername(e.target.value.replace(/[^a-zA-Z0-9_\-]/g, ''))}
+                  placeholder="e.g. ahzammaqsood"
+                  className="w-full text-xs px-3 py-2 border border-slate-300 rounded focus:ring-1 focus:ring-emerald-500 font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-600 mb-1">Display/Full Name (Optional)</label>
+                <input 
+                  type="text"
+                  value={newDisplayName}
+                  onChange={(e) => setNewDisplayName(e.target.value)}
+                  placeholder="e.g. Ahzam Maqsood"
+                  className="w-full text-[11px] px-3 py-2 border border-slate-300 rounded focus:ring-1 focus:ring-emerald-500"
+                />
+              </div>
+
+              <div>
                 <label className="block text-xs font-bold text-slate-600 mb-1">System Authorization Role *</label>
                 <select
                   value={newRole}
@@ -357,7 +487,8 @@ export function UserManagement({ employees, currentUserId }: UserManagementProps
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="bg-slate-100 text-[10px] text-slate-500 font-bold uppercase tracking-wider border-b border-slate-200">
-                  <th className="px-5 py-3">Auth UUID (Unique identifier)</th>
+                  <th className="px-5 py-3">User Profile</th>
+                  <th className="px-5 py-3">Auth UUID</th>
                   <th className="px-5 py-3">Roster Permission Role</th>
                   <th className="px-5 py-3">Linked Employee ID</th>
                   <th className="px-5 py-3 text-right">Action Configuration</th>
@@ -375,6 +506,46 @@ export function UserManagement({ employees, currentUserId }: UserManagementProps
                         isSelf ? 'bg-emerald-50/20' : ''
                       }`}
                     >
+                      {/* User Profile */}
+                      <td className="px-5 py-3.5">
+                        {isEditing ? (
+                          <div className="flex flex-col gap-1.5 max-w-[200px]">
+                            <div>
+                              <span className="text-[10px] uppercase font-bold text-slate-400 block mb-0.5">Username:</span>
+                              <input 
+                                type="text"
+                                value={editUsername}
+                                onChange={(e) => setEditUsername(e.target.value.replace(/[^a-zA-Z0-9_\-]/g, ''))}
+                                placeholder="Username"
+                                className="w-full px-2 py-1 text-xs border border-slate-300 rounded focus:ring-1 focus:ring-emerald-500 font-mono font-bold text-slate-800"
+                                required
+                              />
+                            </div>
+                            <div>
+                              <span className="text-[10px] uppercase font-bold text-slate-400 block mb-0.5">Display Name:</span>
+                              <input 
+                                type="text"
+                                value={editDisplayName}
+                                onChange={(e) => setEditDisplayName(e.target.value)}
+                                placeholder="Display Name"
+                                className="w-full px-2 py-1 text-xs border border-slate-300 rounded focus:ring-1 focus:ring-emerald-500"
+                              />
+                            </div>
+                            <span className="text-[10px] text-slate-450 italic truncate">{row.email}</span>
+                          </div>
+                        ) : (
+                          <div className="flex flex-col gap-0.5">
+                            <span className="font-bold text-slate-900 font-mono text-sm inline-flex items-center gap-1">
+                              @{row.username || 'no_username'}
+                            </span>
+                            <span className="text-xs text-slate-600 font-semibold">
+                              {row.display_name && row.display_name !== 'N/A' ? row.display_name : 'No display name'}
+                            </span>
+                            <span className="text-[10.5px] text-slate-400 font-mono">{row.email}</span>
+                          </div>
+                        )}
+                      </td>
+
                       {/* UUID and label */}
                       <td className="px-5 py-3.5">
                         <div className="flex flex-col gap-1">
@@ -454,7 +625,7 @@ export function UserManagement({ employees, currentUserId }: UserManagementProps
                         {isEditing ? (
                           <div className="flex items-center justify-end gap-1.5">
                             <button
-                              onClick={() => handleSaveEdit(row.id)}
+                              onClick={() => handleSaveEdit(row)}
                               className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold p-1.5 rounded-md hover:shadow-sm cursor-pointer transition-colors"
                               title="Commit updates"
                             >
@@ -478,7 +649,7 @@ export function UserManagement({ employees, currentUserId }: UserManagementProps
                               <Edit3 className="h-3.5 w-3.5" />
                             </button>
                             <button
-                              onClick={() => handleDeleteRole(row.id, row.user_id)}
+                              onClick={() => handleDeleteRole(row)}
                               className="hover:bg-rose-50 border border-slate-300 hover:border-rose-300 text-slate-500 hover:text-rose-600 font-bold p-1.5 rounded shadow-xs cursor-pointer transition-colors"
                               title="Revoke system access mapping"
                             >

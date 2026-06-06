@@ -215,7 +215,18 @@ CREATE TABLE IF NOT EXISTS public.employee_allowances (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 10. USER ROLES TABLE (Authorized Roles)
+-- 10. PROFILES TABLE FOR SECURE USERNAME LOGIN (Requirement 2 & 11)
+CREATE TABLE IF NOT EXISTS public.profiles (
+  user_id UUID PRIMARY KEY, -- references auth.users(id) on delete cascade
+  username TEXT UNIQUE NOT NULL,
+  display_name TEXT,
+  role TEXT NOT NULL, -- 'super_admin' | 'admin' | 'manager' | 'staff_viewer'
+  email TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 11. USER ROLES TABLE (Authorized Roles)
 CREATE TABLE IF NOT EXISTS public.user_roles (
   id TEXT PRIMARY KEY,
   user_id UUID NOT NULL, -- references auth.users(id) on delete cascade
@@ -225,7 +236,7 @@ CREATE TABLE IF NOT EXISTS public.user_roles (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 11. AUDIT LOGS TABLE
+-- 12. AUDIT LOGS TABLE
 CREATE TABLE IF NOT EXISTS public.audit_logs (
   id TEXT PRIMARY KEY,
   user_id UUID,
@@ -239,11 +250,12 @@ CREATE TABLE IF NOT EXISTS public.audit_logs (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 12. INDEXES FOR SPEEDY LOADS
+-- 13. INDEXES FOR SPEEDY LOADS
 CREATE INDEX IF NOT EXISTS idx_attendance_date ON public.attendance_records(attendance_date);
 CREATE INDEX IF NOT EXISTS idx_attendance_employee ON public.attendance_records(employee_id);
 CREATE INDEX IF NOT EXISTS idx_employees_status ON public.employees(status);
 CREATE INDEX IF NOT EXISTS idx_user_roles_uid ON public.user_roles(user_id);
+CREATE INDEX IF NOT EXISTS idx_profiles_username ON public.profiles(username);
 
 -- 13. ENABLE ROW LEVEL SECURITY
 ALTER TABLE public.departments ENABLE ROW LEVEL SECURITY;
@@ -255,20 +267,36 @@ ALTER TABLE public.import_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.monthly_reports ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.employee_commissions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.employee_allowances ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.user_roles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;
 
 -- 14. SECURITY HELPER FUNCTIONS
 CREATE OR REPLACE FUNCTION public.get_user_role()
 RETURNS text SECURITY DEFINER AS $$
+DECLARE
+  v_role text;
 BEGIN
-  RETURN (SELECT role FROM public.user_roles WHERE user_id = auth.uid() LIMIT 1);
+  -- 1. Try profiles table first
+  SELECT role INTO v_role FROM public.profiles WHERE user_id = auth.uid() LIMIT 1;
+  IF v_role IS NOT NULL THEN
+    RETURN v_role;
+  END IF;
+
+  -- 2. Try user_roles table next
+  SELECT role INTO v_role FROM public.user_roles WHERE user_id = auth.uid() LIMIT 1;
+  IF v_role IS NOT NULL THEN
+    RETURN v_role;
+  END IF;
+
+  RETURN 'none';
 END;
 $$ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION public.get_user_employee_id()
 RETURNS text SECURITY DEFINER AS $$
 BEGIN
+  -- Query user_roles directly without calling any recursive policies
   RETURN (SELECT employee_id FROM public.user_roles WHERE user_id = auth.uid() LIMIT 1);
 END;
 $$ LANGUAGE plpgsql;
@@ -393,9 +421,28 @@ DROP POLICY IF EXISTS "super_admin_all_user_roles" ON public.user_roles;
 DROP POLICY IF EXISTS "all_select_own_user_roles" ON public.user_roles;
 
 CREATE POLICY "super_admin_all_user_roles" ON public.user_roles FOR ALL
-  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
+  USING (
+    COALESCE(
+      (SELECT role FROM public.profiles WHERE user_id = auth.uid() LIMIT 1),
+      'none'
+    ) = 'super_admin'
+  )
+  WITH CHECK (
+    COALESCE(
+      (SELECT role FROM public.profiles WHERE user_id = auth.uid() LIMIT 1),
+      'none'
+    ) = 'super_admin'
+  );
 CREATE POLICY "all_select_own_user_roles" ON public.user_roles FOR SELECT
   USING (user_id = auth.uid());
+
+-- PROFILES POLICIES (Requirement 2 & 11)
+DROP POLICY IF EXISTS "public_select_profiles" ON public.profiles;
+DROP POLICY IF EXISTS "super_admin_manage_profiles" ON public.profiles;
+
+CREATE POLICY "public_select_profiles" ON public.profiles FOR SELECT USING (true);
+CREATE POLICY "super_admin_manage_profiles" ON public.profiles FOR ALL 
+  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
 
 -- AUDIT LOGS POLICIES
 DROP POLICY IF EXISTS "super_admin_select_audit_logs" ON public.audit_logs;
@@ -405,6 +452,39 @@ CREATE POLICY "super_admin_select_audit_logs" ON public.audit_logs FOR SELECT
   USING (public.get_user_role() = 'super_admin');
 CREATE POLICY "authenticated_insert_audit_logs" ON public.audit_logs FOR INSERT
   WITH CHECK (auth.uid() IS NOT NULL);
+
+-- Automatic Profile Sync to User Roles Trigger!
+CREATE OR REPLACE FUNCTION public.sync_profiles_to_user_roles()
+RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO public.user_roles (id, user_id, role, employee_id)
+  VALUES ('role_' || NEW.user_id, NEW.user_id, NEW.role, NULL)
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+DROP TRIGGER IF EXISTS trigger_sync_profiles_to_user_roles ON public.profiles;
+CREATE TRIGGER trigger_sync_profiles_to_user_roles
+  AFTER INSERT OR UPDATE ON public.profiles
+  FOR EACH ROW EXECUTE FUNCTION public.sync_profiles_to_user_roles();
+
+-- Seed initial Super Admin profile if auth user exists (Requirement 3)
+DO $$
+DECLARE
+  v_uid UUID;
+BEGIN
+  SELECT id INTO v_uid FROM auth.users WHERE email = 'kapryofficial@gmail.com' LIMIT 1;
+  IF v_uid IS NOT NULL THEN
+    INSERT INTO public.profiles (user_id, username, display_name, role, email)
+    VALUES (v_uid, 'ahzammaqsood', 'Ahzam Maqsood', 'super_admin', 'kapryofficial@gmail.com')
+    ON CONFLICT (user_id) DO UPDATE SET username = 'ahzammaqsood', role = 'super_admin', email = 'kapryofficial@gmail.com';
+    
+    INSERT INTO public.user_roles (id, user_id, role, employee_id)
+    VALUES ('role_super_admin', v_uid, 'super_admin', NULL)
+    ON CONFLICT (id) DO UPDATE SET user_id = v_uid, role = 'super_admin';
+  END IF;
+END $$;
   
 -- DONE! SECURED SYSTEM MIGRATION SUCCESSFULLY COMPLETED!
 
@@ -499,7 +579,17 @@ CREATE TABLE IF NOT EXISTS public.monthly_reports (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 8. CREATE User Roles and Audit Logs Tables if missing
+-- 8. CREATE User Roles, Profiles, and Audit Logs Tables if missing
+CREATE TABLE IF NOT EXISTS public.profiles (
+  user_id UUID PRIMARY KEY, -- references auth.users(id) on delete cascade
+  username TEXT UNIQUE NOT NULL,
+  display_name TEXT,
+  role TEXT NOT NULL, -- 'super_admin' | 'admin' | 'manager' | 'staff_viewer'
+  email TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS public.user_roles (
   id TEXT PRIMARY KEY,
   user_id UUID NOT NULL, -- references auth.users(id) on delete cascade
@@ -532,19 +622,35 @@ ALTER TABLE public.import_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.monthly_reports ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.employee_commissions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.employee_allowances ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.user_roles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;
 
 CREATE OR REPLACE FUNCTION public.get_user_role()
 RETURNS text SECURITY DEFINER AS $$
+DECLARE
+  v_role text;
 BEGIN
-  RETURN (SELECT role FROM public.user_roles WHERE user_id = auth.uid() LIMIT 1);
+  -- 1. Try profiles table first
+  SELECT role INTO v_role FROM public.profiles WHERE user_id = auth.uid() LIMIT 1;
+  IF v_role IS NOT NULL THEN
+    RETURN v_role;
+  END IF;
+
+  -- 2. Try user_roles table next
+  SELECT role INTO v_role FROM public.user_roles WHERE user_id = auth.uid() LIMIT 1;
+  IF v_role IS NOT NULL THEN
+    RETURN v_role;
+  END IF;
+
+  RETURN 'none';
 END;
 $$ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION public.get_user_employee_id()
 RETURNS text SECURITY DEFINER AS $$
 BEGIN
+  -- Query user_roles directly without calling any recursive policies
   RETURN (SELECT employee_id FROM public.user_roles WHERE user_id = auth.uid() LIMIT 1);
 END;
 $$ LANGUAGE plpgsql;
@@ -683,7 +789,18 @@ DROP POLICY IF EXISTS "super_admin_all_user_roles" ON public.user_roles;
 DROP POLICY IF EXISTS "all_select_own_user_roles" ON public.user_roles;
 
 CREATE POLICY "super_admin_all_user_roles" ON public.user_roles FOR ALL
-  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
+  USING (
+    COALESCE(
+      (SELECT role FROM public.profiles WHERE user_id = auth.uid() LIMIT 1),
+      'none'
+    ) = 'super_admin'
+  )
+  WITH CHECK (
+    COALESCE(
+      (SELECT role FROM public.profiles WHERE user_id = auth.uid() LIMIT 1),
+      'none'
+    ) = 'super_admin'
+  );
 CREATE POLICY "all_select_own_user_roles" ON public.user_roles FOR SELECT
   USING (user_id = auth.uid());
 
@@ -695,6 +812,47 @@ CREATE POLICY "super_admin_select_audit_logs" ON public.audit_logs FOR SELECT
   USING (public.get_user_role() = 'super_admin');
 CREATE POLICY "authenticated_insert_audit_logs" ON public.audit_logs FOR INSERT
   WITH CHECK (auth.uid() IS NOT NULL);
+
+-- PROFILES POLICIES (Requirement 2 & 11)
+DROP POLICY IF EXISTS "public_select_profiles" ON public.profiles;
+DROP POLICY IF EXISTS "super_admin_manage_profiles" ON public.profiles;
+
+CREATE POLICY "public_select_profiles" ON public.profiles FOR SELECT USING (true);
+CREATE POLICY "super_admin_manage_profiles" ON public.profiles FOR ALL 
+  USING (public.get_user_role() = 'super_admin') WITH CHECK (public.get_user_role() = 'super_admin');
+
+-- Automatic Profile Sync to User Roles Trigger!
+CREATE OR REPLACE FUNCTION public.sync_profiles_to_user_roles()
+RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO public.user_roles (id, user_id, role, employee_id)
+  VALUES ('role_' || NEW.user_id, NEW.user_id, NEW.role, NULL)
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+DROP TRIGGER IF EXISTS trigger_sync_profiles_to_user_roles ON public.profiles;
+CREATE TRIGGER trigger_sync_profiles_to_user_roles
+  AFTER INSERT OR UPDATE ON public.profiles
+  FOR EACH ROW EXECUTE FUNCTION public.sync_profiles_to_user_roles();
+
+-- Seed initial Super Admin profile if auth user exists (Requirement 3)
+DO $$
+DECLARE
+  v_uid UUID;
+BEGIN
+  SELECT id INTO v_uid FROM auth.users WHERE email = 'kapryofficial@gmail.com' LIMIT 1;
+  IF v_uid IS NOT NULL THEN
+    INSERT INTO public.profiles (user_id, username, display_name, role, email)
+    VALUES (v_uid, 'ahzammaqsood', 'Ahzam Maqsood', 'super_admin', 'kapryofficial@gmail.com')
+    ON CONFLICT (user_id) DO UPDATE SET username = 'ahzammaqsood', role = 'super_admin', email = 'kapryofficial@gmail.com';
+    
+    INSERT INTO public.user_roles (id, user_id, role, employee_id)
+    VALUES ('role_super_admin', v_uid, 'super_admin', NULL)
+    ON CONFLICT (id) DO UPDATE SET user_id = v_uid, role = 'super_admin';
+  END IF;
+END $$;
 
 `;
 
