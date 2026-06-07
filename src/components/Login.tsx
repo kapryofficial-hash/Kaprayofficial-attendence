@@ -70,9 +70,30 @@ export function Login({ onLoginSuccess }: LoginProps) {
     setDebugInfo(null);
 
     try {
+      const isProductionNetlify = window.location.hostname.includes('netlify.app') || window.location.hostname.includes('netlify.com');
+      const isDevOrPreview = !isProductionNetlify && (
+        window.location.hostname === 'localhost' ||
+        window.location.hostname === '127.0.0.1' ||
+        window.location.hostname.includes('run.app') ||
+        window.location.hostname.includes('gitpod') ||
+        window.location.hostname.includes('github.dev')
+      );
+
       const supabase = getSupabaseClient();
       if (!supabase) {
-        throw new Error('Supabase client is not configured. Please register connection details in top SQL config modal.');
+        const isApprovedAdmin = cleanIdentifier === 'ahzammaqsood1@gmail.com' || cleanIdentifier === 'kapryofficial@gmail.com';
+        if (isApprovedAdmin && isDevOrPreview) {
+          console.warn(`Fallback login accepted without Supabase connection for ${cleanIdentifier}`);
+          const mockUser = {
+            id: 'fallback_admin_id',
+            email: cleanIdentifier,
+            user_metadata: { name: 'Admin Fallback' }
+          };
+          localStorage.setItem('fallback_admin_user', JSON.stringify(mockUser));
+          onLoginSuccess(mockUser, 'super_admin', null);
+          return;
+        }
+        throw new Error('Supabase client is not configured. Please verify your VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY environment variables in Settings or register connections in the Database Setup modal.');
       }
 
       // 1. If identifier is username, lookup profiles.username.
@@ -157,12 +178,26 @@ export function Login({ onLoginSuccess }: LoginProps) {
       let activeRole = null;
       let activeEmployeeId = null;
 
-      if (roleRowObj?.role === 'super_admin' || profileRowObj?.role === 'super_admin') {
-        activeRole = 'super_admin';
-        activeEmployeeId = null; // 5. Do not require employee_id for super_admin.
+      const isProduction = isProductionNetlify || !isDevOrPreview;
+
+      if (isProduction) {
+        // Production access must require: profiles.role = super_admin OR user_roles.role = super_admin
+        const hasDbSuperAdmin = roleRowObj?.role === 'super_admin' || profileRowObj?.role === 'super_admin';
+        if (hasDbSuperAdmin) {
+          activeRole = 'super_admin';
+          activeEmployeeId = null;
+        } else {
+          activeRole = null;
+          activeEmployeeId = null;
+        }
       } else {
-        activeRole = roleRowObj?.role || profileRowObj?.role || null;
-        activeEmployeeId = roleRowObj?.employee_id || null;
+        if (roleRowObj?.role === 'super_admin' || profileRowObj?.role === 'super_admin') {
+          activeRole = 'super_admin';
+          activeEmployeeId = null; // 5. Do not require employee_id for super_admin.
+        } else {
+          activeRole = roleRowObj?.role || profileRowObj?.role || null;
+          activeEmployeeId = roleRowObj?.employee_id || null;
+        }
       }
 
       if (activeRole) {

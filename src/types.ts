@@ -156,5 +156,82 @@ export interface AuditLog {
   created_at?: string;
 }
 
+export interface SalaryReview {
+  id: string;
+  employee_id: string;
+  month: string;
+  year: string;
+  amount: number;
+  reason: string;
+  status: 'Draft' | 'Reviewed' | 'Approved' | 'Locked' | 'Paid';
+  approved_by?: string | null;
+  approved_at?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface OwnerAdjustment {
+  id: string;
+  employee_id: string;
+  employee_name: string;
+  month: string; // MM
+  year: string;  // YYYY
+  adjustment_type: 'Bonus' | 'Attendance Bonus' | 'Performance Bonus' | 'Festival Bonus' | 'Special Allowance' | 'Salary Correction' | 'Advance Recovery' | 'Fine' | 'Manual Deduction';
+  amount: number;
+  reason: string;
+  created_by: string;
+  approved_by: string | null;
+  created_at: string;
+  approved_at: string | null;
+}
+
+export interface EmployeeDocument {
+  id: string;
+  employee_id: string;
+  document_type: 'CNIC Front' | 'CNIC Back' | 'CV' | 'Appointment Letter' | 'Salary Agreement' | 'Warning Letters' | 'Resignation Letter' | 'Misc Documents';
+  file_name: string;
+  file_type: string;
+  file_size: number;
+  file_data: string; // base64 payload
+  uploaded_by: string;
+  uploaded_at: string;
+}
+
+export interface EmployeeAdvance {
+  id: string;
+  employee_id: string;
+  date: string; // YYYY-MM-DD
+  amount: number;
+  reason: string;
+  approved_by: string;
+  remaining_balance: number;
+  created_at: string;
+}
+
+export interface AdvanceRecovery {
+  id: string;
+  advance_id: string;
+  employee_id: string;
+  date: string; // YYYY-MM-DD
+  recovered_amount: number;
+  recovery_month: string; // YYYY-MM
+  recovery_type: 'Salary Deduction' | 'Manual Payment';
+  recovered_by: string;
+  created_at: string;
+}
+
+export interface EmployeeWarning {
+  id: string;
+  employee_id: string;
+  date: string; // YYYY-MM-DD
+  warning_type: 'Verbal Warning' | 'Written Warning' | 'Final Warning';
+  reason: string;
+  issued_by: string;
+  attachment_name?: string | null;
+  attachment_data?: string | null; // base64
+  status: 'Active' | 'Resolved' | 'Expired';
+  created_at: string;
+}
+
 
 

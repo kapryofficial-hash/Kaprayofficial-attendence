@@ -4,16 +4,31 @@ const LS_URL_KEY = 'custom_supabase_url';
 const LS_KEY_KEY = 'custom_supabase_anon_key';
 
 export function getSupabaseCredentials() {
-  const meta = import.meta as any;
-  const envUrl = meta.env?.VITE_SUPABASE_URL;
-  const envKey = meta.env?.VITE_SUPABASE_ANON_KEY;
+  // @ts-ignore
+  const envUrl = import.meta.env?.VITE_SUPABASE_URL || '';
+  // @ts-ignore
+  const envKey = import.meta.env?.VITE_SUPABASE_ANON_KEY || '';
   
   const customUrl = localStorage.getItem(LS_URL_KEY);
   const customKey = localStorage.getItem(LS_KEY_KEY);
   
+  const finalUrl = customUrl || envUrl || '';
+  const finalKey = customKey || envKey || '';
+
+  console.log('=== SUPABASE CLIENT CONFIG DEBUG ===');
+  console.log('import.meta.env.VITE_SUPABASE_URL:', envUrl ? `FOUND (length: ${envUrl.length})` : 'MISSING');
+  console.log('import.meta.env.VITE_SUPABASE_ANON_KEY:', envKey ? `FOUND (length: ${envKey.length})` : 'MISSING');
+  console.log('localStorage custom_supabase_url (LS_URL_KEY):', customUrl ? `FOUND (length: ${customUrl.length})` : 'MISSING');
+  console.log('localStorage custom_supabase_anon_key (LS_KEY_KEY):', customKey ? `FOUND (length: ${customKey.length})` : 'MISSING');
+  console.log('Supabase URL exists:', !!finalUrl);
+  console.log('anon key exists:', !!finalKey);
+  console.log('URL length:', finalUrl ? finalUrl.length : 0);
+  console.log('anon key length:', finalKey ? finalKey.length : 0);
+  console.log('====================================');
+  
   return {
-    url: customUrl || envUrl || '',
-    key: customKey || envKey || '',
+    url: finalUrl,
+    key: finalKey,
     isEnv: !customUrl && !!envUrl
   };
 }
@@ -474,11 +489,11 @@ DO $$
 DECLARE
   v_uid UUID;
 BEGIN
-  SELECT id INTO v_uid FROM auth.users WHERE email = 'kapryofficial@gmail.com' LIMIT 1;
+  SELECT id INTO v_uid FROM auth.users WHERE email = 'ahzammaqsood1@gmail.com' LIMIT 1;
   IF v_uid IS NOT NULL THEN
     INSERT INTO public.profiles (user_id, username, display_name, role, email)
-    VALUES (v_uid, 'ahzammaqsood', 'Ahzam Maqsood', 'super_admin', 'kapryofficial@gmail.com')
-    ON CONFLICT (user_id) DO UPDATE SET username = 'ahzammaqsood', role = 'super_admin', email = 'kapryofficial@gmail.com';
+    VALUES (v_uid, 'ahzammaqsood', 'Ahzam Maqsood', 'super_admin', 'ahzammaqsood1@gmail.com')
+    ON CONFLICT (user_id) DO UPDATE SET username = 'ahzammaqsood', role = 'super_admin', email = 'ahzammaqsood1@gmail.com';
     
     INSERT INTO public.user_roles (id, user_id, role, employee_id)
     VALUES ('role_super_admin', v_uid, 'super_admin', NULL)
@@ -612,6 +627,49 @@ CREATE TABLE IF NOT EXISTS public.audit_logs (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- 8B. CREATE Salary Reviews Table if missing
+CREATE TABLE IF NOT EXISTS public.salary_reviews (
+  id TEXT PRIMARY KEY,
+  employee_id TEXT REFERENCES public.employees(id) ON DELETE CASCADE,
+  month TEXT NOT NULL,
+  year TEXT NOT NULL,
+  amount NUMERIC DEFAULT 0,
+  reason TEXT,
+  status TEXT DEFAULT 'Draft', -- Draft, Reviewed, Approved, Locked, Paid
+  approved_by TEXT,
+  approved_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 8C. CREATE Archive Logs Table if missing
+CREATE TABLE IF NOT EXISTS public.archive_logs (
+  id TEXT PRIMARY KEY,
+  month TEXT NOT NULL,
+  year TEXT NOT NULL,
+  archived_by TEXT,
+  archived_at TIMESTAMPTZ DEFAULT NOW(),
+  status TEXT,
+  remarks TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 8D. CREATE Owner Adjustments Table if missing
+CREATE TABLE IF NOT EXISTS public.owner_adjustments (
+  id TEXT PRIMARY KEY,
+  employee_id TEXT REFERENCES public.employees(id) ON DELETE CASCADE,
+  employee_name TEXT,
+  month TEXT NOT NULL,
+  year TEXT NOT NULL,
+  adjustment_type TEXT NOT NULL,
+  amount NUMERIC DEFAULT 0,
+  reason TEXT NOT NULL,
+  created_by TEXT,
+  approved_by TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  approved_at TIMESTAMPTZ
+);
+
 -- 9. RE-APPLY RLS, SECURITY HELPERS, AND SECURE ROLE POLICIES
 ALTER TABLE public.departments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.employees ENABLE ROW LEVEL SECURITY;
@@ -625,6 +683,19 @@ ALTER TABLE public.employee_allowances ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.user_roles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.salary_reviews ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.archive_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.owner_adjustments ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "super_admin_all_salary_reviews" ON public.salary_reviews;
+CREATE POLICY "super_admin_all_salary_reviews" ON public.salary_reviews FOR ALL USING (true);
+
+DROP POLICY IF EXISTS "super_admin_all_owner_adjustments" ON public.owner_adjustments;
+CREATE POLICY "super_admin_all_owner_adjustments" ON public.owner_adjustments FOR ALL USING (true);
+
+
+DROP POLICY IF EXISTS "super_admin_all_archive_logs" ON public.archive_logs;
+CREATE POLICY "super_admin_all_archive_logs" ON public.archive_logs FOR ALL USING (true);
 
 CREATE OR REPLACE FUNCTION public.get_user_role()
 RETURNS text SECURITY DEFINER AS $$
@@ -842,11 +913,11 @@ DO $$
 DECLARE
   v_uid UUID;
 BEGIN
-  SELECT id INTO v_uid FROM auth.users WHERE email = 'kapryofficial@gmail.com' LIMIT 1;
+  SELECT id INTO v_uid FROM auth.users WHERE email = 'ahzammaqsood1@gmail.com' LIMIT 1;
   IF v_uid IS NOT NULL THEN
     INSERT INTO public.profiles (user_id, username, display_name, role, email)
-    VALUES (v_uid, 'ahzammaqsood', 'Ahzam Maqsood', 'super_admin', 'kapryofficial@gmail.com')
-    ON CONFLICT (user_id) DO UPDATE SET username = 'ahzammaqsood', role = 'super_admin', email = 'kapryofficial@gmail.com';
+    VALUES (v_uid, 'ahzammaqsood', 'Ahzam Maqsood', 'super_admin', 'ahzammaqsood1@gmail.com')
+    ON CONFLICT (user_id) DO UPDATE SET username = 'ahzammaqsood', role = 'super_admin', email = 'ahzammaqsood1@gmail.com';
     
     INSERT INTO public.user_roles (id, user_id, role, employee_id)
     VALUES ('role_super_admin', v_uid, 'super_admin', NULL)

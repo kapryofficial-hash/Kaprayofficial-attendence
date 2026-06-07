@@ -9,7 +9,7 @@ import {
   DbDepartment
 } from './supabaseClient';
 import { calculateAttendanceRecord } from './utils';
-import { EmployeeCommission, EmployeeAllowance, AuditLog } from './types';
+import { EmployeeCommission, EmployeeAllowance, AuditLog, SalaryReview, OwnerAdjustment, EmployeeDocument, EmployeeAdvance, AdvanceRecovery, EmployeeWarning } from './types';
 
 const EMPLOYEES_LS_KEY = 'excel_erp_employees';
 const ATTENDANCE_LS_KEY = 'excel_erp_attendance_records';
@@ -20,6 +20,12 @@ const EDIT_HISTORY_LS_KEY = 'excel_erp_edit_history';
 const DEPARTMENTS_LS_KEY = 'excel_erp_departments';
 const COMMISSIONS_LS_KEY = 'excel_erp_employee_commissions';
 const ALLOWANCES_LS_KEY = 'excel_erp_employee_allowances';
+const SALARY_REVIEWS_LS_KEY = 'excel_erp_salary_reviews';
+const OWNER_ADJUSTMENTS_LS_KEY = 'excel_erp_owner_adjustments';
+const DOCUMENTS_LS_KEY = 'excel_erp_employee_documents';
+const ADVANCES_LS_KEY = 'excel_erp_employee_advances';
+const RECOVERIES_LS_KEY = 'excel_erp_advance_recoveries';
+const WARNINGS_LS_KEY = 'excel_erp_employee_warnings';
 
 // Professional Default departments for immediate onboarding
 const DEFAULT_DEPARTMENTS: DbDepartment[] = [
@@ -614,11 +620,22 @@ export async function hardWipeTable(
 /**
  * Loads attendance records
  */
-export async function loadAttendance(includeDeleted: boolean = false): Promise<{ data: DbAttendance[]; source: 'supabase' | 'local'; error?: string }> {
+export async function loadAttendance(
+  includeDeleted: boolean = false,
+  year?: string,
+  month?: string
+): Promise<{ data: DbAttendance[]; source: 'supabase' | 'local'; error?: string }> {
   const supabase = getSupabaseClient();
   if (!supabase) {
     const local = getSafeLocal<DbAttendance[]>(ATTENDANCE_LS_KEY, []);
-    const filtered = includeDeleted ? local : local.filter(a => !a.is_deleted);
+    let filtered = includeDeleted ? local : local.filter(a => !a.is_deleted);
+    if (year && month) {
+      filtered = filtered.filter(a => {
+        const dStr = a.attendance_date || a.date || '';
+        const [y, m] = dStr.split('-');
+        return y === year && m === month;
+      });
+    }
     return { data: filtered, source: 'local' };
   }
 
@@ -626,6 +643,11 @@ export async function loadAttendance(includeDeleted: boolean = false): Promise<{
     let query = supabase.from('attendance_records').select('*');
     if (!includeDeleted) {
       query = query.eq('is_deleted', false);
+    }
+    if (year && month) {
+      const startDate = `${year}-${month}-01`;
+      const endDate = `${year}-${month}-31`;
+      query = query.gte('attendance_date', startDate).lte('attendance_date', endDate);
     }
     const { data: rawData, error } = await query.order('attendance_date', { ascending: false });
     if (error) {
@@ -864,14 +886,14 @@ export async function saveEditHistory(history: DbAttendanceEditHistory): Promise
 export async function loadMonthlyReports(): Promise<{ data: DbMonthlyReport[]; error?: string }> {
   const supabase = getSupabaseClient();
   if (!supabase) {
-    return { data: getSafeLocal<DbMonthlyReport[]>(MONTHS_LS_KEY, []) };
+    return { data: [], error: 'Supabase client unavailable' };
   }
   try {
     const { data, error } = await supabase.from('monthly_reports').select('*').order('id', { ascending: false });
     if (error) throw error;
     return { data: data || [] };
   } catch (err: any) {
-    return { data: getSafeLocal<DbMonthlyReport[]>(MONTHS_LS_KEY, []), error: formatSupabaseError(err, 'monthly_reports') };
+    return { data: [], error: formatSupabaseError(err, 'monthly_reports') };
   }
 }
 
@@ -879,18 +901,8 @@ export async function loadMonthlyReports(): Promise<{ data: DbMonthlyReport[]; e
  * Save monthly compiled reports
  */
 export async function saveMonthlyReport(report: DbMonthlyReport): Promise<{ success: boolean; error?: string }> {
-  const local = getSafeLocal<DbMonthlyReport[]>(MONTHS_LS_KEY, []);
-  const idx = local.findIndex(m => m.id === report.id);
-  
-  if (idx >= 0) {
-    local[idx] = report;
-  } else {
-    local.push(report);
-  }
-  setSafeLocal(MONTHS_LS_KEY, local);
-
   const supabase = getSupabaseClient();
-  if (!supabase) return { success: true };
+  if (!supabase) return { success: false, error: 'Supabase client unavailable' };
 
   try {
     const payload = {
@@ -1246,14 +1258,6 @@ export async function runDatabaseDiagnostic(): Promise<DiagnosticResult[]> {
       columns: ['id', 'attendance_id', 'employee_id', 'old_data', 'new_data', 'edited_by', 'edit_reason', 'created_at']
     },
     {
-      tableName: 'monthly_reports',
-      columns: ['id', 'employee_id', 'month', 'year', 'present_days', 'absent_days', 'leave_days', 'off_days', 'late_count', 'missing_checkout_count', 'total_hours', 'overtime_hours', 'short_hours', 'performance_score', 'remarks', 'archived', 'locked', 'created_at', 'updated_at']
-    },
-    {
-      tableName: 'attendance_edit_history',
-      columns: ['id', 'attendance_id', 'employee_id', 'old_data', 'new_data', 'edited_by', 'edit_reason', 'created_at']
-    },
-    {
       tableName: 'import_logs',
       columns: ['id', 'file_name', 'import_type', 'total_rows', 'success_rows', 'failed_rows', 'duplicate_rows', 'imported_by', 'created_at']
     },
@@ -1264,6 +1268,22 @@ export async function runDatabaseDiagnostic(): Promise<DiagnosticResult[]> {
     {
       tableName: 'employee_allowances',
       columns: ['id', 'employee_id', 'month', 'year', 'allowance_amount', 'allowance_type', 'reason', 'approved_by', 'created_at', 'updated_at']
+    },
+    {
+      tableName: 'salary_reviews',
+      columns: ['id', 'employee_id', 'month', 'year', 'amount', 'reason', 'status', 'approved_by', 'approved_at', 'created_at', 'updated_at']
+    },
+    {
+      tableName: 'audit_logs',
+      columns: ['id', 'user_id', 'user_email', 'role', 'action', 'table_name', 'record_id', 'old_data', 'new_data', 'created_at']
+    },
+    {
+      tableName: 'archive_logs',
+      columns: ['id', 'month', 'year', 'archived_by', 'archived_at', 'status', 'remarks', 'created_at']
+    },
+    {
+      tableName: 'owner_adjustments',
+      columns: ['id', 'employee_id', 'employee_name', 'month', 'year', 'adjustment_type', 'amount', 'reason', 'created_by', 'approved_by', 'created_at', 'approved_at']
     }
   ];
 
@@ -1321,14 +1341,14 @@ export async function runDatabaseDiagnostic(): Promise<DiagnosticResult[]> {
 export async function loadCommissions(): Promise<{ data: EmployeeCommission[]; error?: string }> {
   const supabase = getSupabaseClient();
   if (!supabase) {
-    return { data: getSafeLocal<EmployeeCommission[]>(COMMISSIONS_LS_KEY, []) };
+    return { data: [], error: 'Supabase client unavailable' };
   }
   try {
     const { data, error } = await supabase.from('employee_commissions').select('*').order('id', { ascending: false });
     if (error) throw error;
     return { data: data || [] };
   } catch (err: any) {
-    return { data: getSafeLocal<EmployeeCommission[]>(COMMISSIONS_LS_KEY, []), error: formatSupabaseError(err, 'employee_commissions') };
+    return { data: [], error: formatSupabaseError(err, 'employee_commissions') };
   }
 }
 
@@ -1336,17 +1356,8 @@ export async function loadCommissions(): Promise<{ data: EmployeeCommission[]; e
  * Saves or updates employee commission.
  */
 export async function saveCommission(comm: EmployeeCommission): Promise<{ success: boolean; error?: string }> {
-  const local = getSafeLocal<EmployeeCommission[]>(COMMISSIONS_LS_KEY, []);
-  const idx = local.findIndex(c => c.id === comm.id);
-  if (idx >= 0) {
-    local[idx] = comm;
-  } else {
-    local.push(comm);
-  }
-  setSafeLocal(COMMISSIONS_LS_KEY, local);
-
   const supabase = getSupabaseClient();
-  if (!supabase) return { success: true };
+  if (!supabase) return { success: false, error: 'Supabase client unavailable' };
 
   try {
     const { error } = await supabase.from('employee_commissions').upsert(comm);
@@ -1361,12 +1372,8 @@ export async function saveCommission(comm: EmployeeCommission): Promise<{ succes
  * Deletes employee commission.
  */
 export async function deleteCommission(id: string): Promise<{ success: boolean; error?: string }> {
-  const local = getSafeLocal<EmployeeCommission[]>(COMMISSIONS_LS_KEY, []);
-  const filtered = local.filter(c => c.id !== id);
-  setSafeLocal(COMMISSIONS_LS_KEY, filtered);
-
   const supabase = getSupabaseClient();
-  if (!supabase) return { success: true };
+  if (!supabase) return { success: false, error: 'Supabase client unavailable' };
 
   try {
     const { error } = await supabase.from('employee_commissions').delete().eq('id', id);
@@ -1383,14 +1390,14 @@ export async function deleteCommission(id: string): Promise<{ success: boolean; 
 export async function loadAllowances(): Promise<{ data: EmployeeAllowance[]; error?: string }> {
   const supabase = getSupabaseClient();
   if (!supabase) {
-    return { data: getSafeLocal<EmployeeAllowance[]>(ALLOWANCES_LS_KEY, []) };
+    return { data: [], error: 'Supabase client unavailable' };
   }
   try {
     const { data, error } = await supabase.from('employee_allowances').select('*').order('id', { ascending: false });
     if (error) throw error;
     return { data: data || [] };
   } catch (err: any) {
-    return { data: getSafeLocal<EmployeeAllowance[]>(ALLOWANCES_LS_KEY, []), error: formatSupabaseError(err, 'employee_allowances') };
+    return { data: [], error: formatSupabaseError(err, 'employee_allowances') };
   }
 }
 
@@ -1398,17 +1405,8 @@ export async function loadAllowances(): Promise<{ data: EmployeeAllowance[]; err
  * Saves or updates employee allowance.
  */
 export async function saveAllowance(allw: EmployeeAllowance): Promise<{ success: boolean; error?: string }> {
-  const local = getSafeLocal<EmployeeAllowance[]>(ALLOWANCES_LS_KEY, []);
-  const idx = local.findIndex(a => a.id === allw.id);
-  if (idx >= 0) {
-    local[idx] = allw;
-  } else {
-    local.push(allw);
-  }
-  setSafeLocal(ALLOWANCES_LS_KEY, local);
-
   const supabase = getSupabaseClient();
-  if (!supabase) return { success: true };
+  if (!supabase) return { success: false, error: 'Supabase client unavailable' };
 
   try {
     const { error } = await supabase.from('employee_allowances').upsert(allw);
@@ -1423,12 +1421,8 @@ export async function saveAllowance(allw: EmployeeAllowance): Promise<{ success:
  * Deletes employee allowance.
  */
 export async function deleteAllowance(id: string): Promise<{ success: boolean; error?: string }> {
-  const local = getSafeLocal<EmployeeAllowance[]>(ALLOWANCES_LS_KEY, []);
-  const filtered = local.filter(a => a.id !== id);
-  setSafeLocal(ALLOWANCES_LS_KEY, filtered);
-
   const supabase = getSupabaseClient();
-  if (!supabase) return { success: true };
+  if (!supabase) return { success: false, error: 'Supabase client unavailable' };
 
   try {
     const { error } = await supabase.from('employee_allowances').delete().eq('id', id);
@@ -1465,5 +1459,414 @@ export async function saveAuditLog(logEntry: AuditLog): Promise<{ success: boole
     return { success: false, error: formatSupabaseError(err, 'audit_logs') };
   }
 }
+
+/**
+ * Loads list of employee salary reviews.
+ */
+export async function loadSalaryReviews(): Promise<{ data: SalaryReview[]; error?: string }> {
+  const supabase = getSupabaseClient();
+  if (!supabase) {
+    return { data: [], error: 'Supabase client unavailable' };
+  }
+  try {
+    const { data, error } = await supabase.from('salary_reviews').select('*').order('id', { ascending: false });
+    if (error) throw error;
+    return { data: data || [] };
+  } catch (err: any) {
+    return { data: [], error: formatSupabaseError(err, 'salary_reviews') };
+  }
+}
+
+/**
+ * Saves or updates employee salary review (manual adjustment and state).
+ */
+export async function saveSalaryReview(review: SalaryReview): Promise<{ success: boolean; error?: string }> {
+  const supabase = getSupabaseClient();
+  if (!supabase) return { success: false, error: 'Supabase client unavailable' };
+
+  try {
+    const { error } = await supabase.from('salary_reviews').upsert(review);
+    if (error) throw error;
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: formatSupabaseError(err, 'salary_reviews') };
+  }
+}
+
+/**
+ * Loads list of owner adjustments.
+ */
+export async function loadOwnerAdjustments(): Promise<{ data: OwnerAdjustment[]; error?: string }> {
+  const supabase = getSupabaseClient();
+  if (!supabase) {
+    return { data: getSafeLocal<OwnerAdjustment[]>(OWNER_ADJUSTMENTS_LS_KEY, []) };
+  }
+  try {
+    const { data, error } = await supabase.from('owner_adjustments').select('*').order('created_at', { ascending: false });
+    if (error) throw error;
+    return { data: data || [] };
+  } catch (err: any) {
+    return { data: getSafeLocal<OwnerAdjustment[]>(OWNER_ADJUSTMENTS_LS_KEY, []), error: formatSupabaseError(err, 'owner_adjustments') };
+  }
+}
+
+/**
+ * Saves/updates an owner adjustment.
+ */
+export async function saveOwnerAdjustment(adj: OwnerAdjustment): Promise<{ success: boolean; error?: string }> {
+  const local = getSafeLocal<OwnerAdjustment[]>(OWNER_ADJUSTMENTS_LS_KEY, []);
+  const idx = local.findIndex(a => a.id === adj.id);
+  if (idx >= 0) {
+    local[idx] = adj;
+  } else {
+    local.push(adj);
+  }
+  setSafeLocal(OWNER_ADJUSTMENTS_LS_KEY, local);
+
+  const supabase = getSupabaseClient();
+  if (!supabase) return { success: true };
+
+  try {
+    const { error } = await supabase.from('owner_adjustments').upsert(adj);
+    if (error) throw error;
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: formatSupabaseError(err, 'owner_adjustments') };
+  }
+}
+
+/**
+ * Deletes an owner adjustment.
+ */
+export async function deleteOwnerAdjustment(id: string): Promise<{ success: boolean; error?: string }> {
+  const local = getSafeLocal<OwnerAdjustment[]>(OWNER_ADJUSTMENTS_LS_KEY, []);
+  const filtered = local.filter(a => a.id !== id);
+  setSafeLocal(OWNER_ADJUSTMENTS_LS_KEY, filtered);
+
+  const supabase = getSupabaseClient();
+  if (!supabase) return { success: true };
+
+  try {
+    const { error } = await supabase.from('owner_adjustments').delete().eq('id', id);
+    if (error) throw error;
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: formatSupabaseError(err, 'owner_adjustments') };
+  }
+}
+
+/**
+ * Loads entire list of audit logs for chronological timeline audits.
+ */
+export async function loadAuditLogs(): Promise<{ data: AuditLog[]; error?: string }> {
+  const supabase = getSupabaseClient();
+  if (!supabase) {
+    return { data: getSafeLocal<AuditLog[]>('excel_erp_audit_logs', []) };
+  }
+  try {
+    const { data, error } = await supabase.from('audit_logs').select('*').order('created_at', { ascending: false });
+    if (error) throw error;
+    return { data: data || [] };
+  } catch (err: any) {
+    return { data: getSafeLocal<AuditLog[]>('excel_erp_audit_logs', []), error: formatSupabaseError(err, 'audit_logs') };
+  }
+}
+
+/**
+ * Loads employee documents.
+ */
+export async function loadEmployeeDocuments(): Promise<{ data: EmployeeDocument[]; error?: string }> {
+  const supabase = getSupabaseClient();
+  if (!supabase) {
+    return { data: getSafeLocal<EmployeeDocument[]>(DOCUMENTS_LS_KEY, []) };
+  }
+  try {
+    const { data, error } = await supabase.from('employee_documents').select('*').order('uploaded_at', { ascending: false });
+    if (error) throw error;
+    return { data: data || [] };
+  } catch (err: any) {
+    return { data: getSafeLocal<EmployeeDocument[]>(DOCUMENTS_LS_KEY, []), error: formatSupabaseError(err, 'employee_documents') };
+  }
+}
+
+/**
+ * Saves/updates an employee document.
+ */
+export async function saveEmployeeDocument(doc: EmployeeDocument): Promise<{ success: boolean; error?: string }> {
+  const local = getSafeLocal<EmployeeDocument[]>(DOCUMENTS_LS_KEY, []);
+  const idx = local.findIndex(d => d.id === doc.id);
+  if (idx >= 0) {
+    local[idx] = doc;
+  } else {
+    local.push(doc);
+  }
+  setSafeLocal(DOCUMENTS_LS_KEY, local);
+
+  const supabase = getSupabaseClient();
+  if (!supabase) return { success: true };
+  try {
+    const { error } = await supabase.from('employee_documents').upsert(doc);
+    if (error) throw error;
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: formatSupabaseError(err, 'employee_documents') };
+  }
+}
+
+/**
+ * Deletes an employee document.
+ */
+export async function deleteEmployeeDocument(id: string): Promise<{ success: boolean; error?: string }> {
+  const local = getSafeLocal<EmployeeDocument[]>(DOCUMENTS_LS_KEY, []);
+  const filtered = local.filter(d => d.id !== id);
+  setSafeLocal(DOCUMENTS_LS_KEY, filtered);
+
+  const supabase = getSupabaseClient();
+  if (!supabase) return { success: true };
+  try {
+    const { error } = await supabase.from('employee_documents').delete().eq('id', id);
+    if (error) throw error;
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: formatSupabaseError(err, 'employee_documents') };
+  }
+}
+
+/**
+ * Loads employee advances.
+ */
+export async function loadEmployeeAdvances(): Promise<{ data: EmployeeAdvance[]; error?: string }> {
+  const supabase = getSupabaseClient();
+  if (!supabase) {
+    return { data: [], error: 'Supabase client unavailable' };
+  }
+  try {
+    const { data, error } = await supabase.from('employee_advances').select('*').order('date', { ascending: false });
+    if (error) throw error;
+    return { data: data || [] };
+  } catch (err: any) {
+    return { data: [], error: formatSupabaseError(err, 'employee_advances') };
+  }
+}
+
+/**
+ * Saves/updates an employee advance.
+ */
+export async function saveEmployeeAdvance(adv: EmployeeAdvance): Promise<{ success: boolean; error?: string }> {
+  const supabase = getSupabaseClient();
+  if (!supabase) return { success: false, error: 'Supabase client unavailable' };
+  try {
+    const { error } = await supabase.from('employee_advances').upsert(adv);
+    if (error) throw error;
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: formatSupabaseError(err, 'employee_advances') };
+  }
+}
+
+/**
+ * Deletes an employee advance.
+ */
+export async function deleteEmployeeAdvance(id: string): Promise<{ success: boolean; error?: string }> {
+  const supabase = getSupabaseClient();
+  if (!supabase) return { success: false, error: 'Supabase client unavailable' };
+  try {
+    const { error } = await supabase.from('employee_advances').delete().eq('id', id);
+    if (error) throw error;
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: formatSupabaseError(err, 'employee_advances') };
+  }
+}
+
+/**
+ * Loads advance recoveries.
+ */
+export async function loadAdvanceRecoveries(): Promise<{ data: AdvanceRecovery[]; error?: string }> {
+  const supabase = getSupabaseClient();
+  if (!supabase) {
+    return { data: [], error: 'Supabase client unavailable' };
+  }
+  try {
+    const { data, error } = await supabase.from('advance_recoveries').select('*').order('date', { ascending: false });
+    if (error) throw error;
+    return { data: data || [] };
+  } catch (err: any) {
+    return { data: [], error: formatSupabaseError(err, 'advance_recoveries') };
+  }
+}
+
+/**
+ * Saves/updates an advance recovery.
+ */
+export async function saveAdvanceRecovery(rec: AdvanceRecovery): Promise<{ success: boolean; error?: string }> {
+  const supabase = getSupabaseClient();
+  if (!supabase) return { success: false, error: 'Supabase client unavailable' };
+  try {
+    const { error } = await supabase.from('advance_recoveries').upsert(rec);
+    if (error) throw error;
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: formatSupabaseError(err, 'advance_recoveries') };
+  }
+}
+
+/**
+ * Deletes an advance recovery.
+ */
+export async function deleteAdvanceRecovery(id: string): Promise<{ success: boolean; error?: string }> {
+  const supabase = getSupabaseClient();
+  if (!supabase) return { success: false, error: 'Supabase client unavailable' };
+  try {
+    const { error } = await supabase.from('advance_recoveries').delete().eq('id', id);
+    if (error) throw error;
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: formatSupabaseError(err, 'advance_recoveries') };
+  }
+}
+
+/**
+ * Loads employee warnings.
+ */
+export async function loadEmployeeWarnings(): Promise<{ data: EmployeeWarning[]; error?: string }> {
+  const supabase = getSupabaseClient();
+  if (!supabase) {
+    return { data: getSafeLocal<EmployeeWarning[]>(WARNINGS_LS_KEY, []) };
+  }
+  try {
+    const { data, error } = await supabase.from('employee_warnings').select('*').order('date', { ascending: false });
+    if (error) throw error;
+    return { data: data || [] };
+  } catch (err: any) {
+    return { data: getSafeLocal<EmployeeWarning[]>(WARNINGS_LS_KEY, []), error: formatSupabaseError(err, 'employee_warnings') };
+  }
+}
+
+/**
+ * Saves/updates an employee warning.
+ */
+export async function saveEmployeeWarning(warn: EmployeeWarning): Promise<{ success: boolean; error?: string }> {
+  const local = getSafeLocal<EmployeeWarning[]>(WARNINGS_LS_KEY, []);
+  const idx = local.findIndex(w => w.id === warn.id);
+  if (idx >= 0) {
+    local[idx] = warn;
+  } else {
+    local.push(warn);
+  }
+  setSafeLocal(WARNINGS_LS_KEY, local);
+
+  const supabase = getSupabaseClient();
+  if (!supabase) return { success: true };
+  try {
+    const { error } = await supabase.from('employee_warnings').upsert(warn);
+    if (error) throw error;
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: formatSupabaseError(err, 'employee_warnings') };
+  }
+}
+
+/**
+ * Deletes an employee warning.
+ */
+export async function deleteEmployeeWarning(id: string): Promise<{ success: boolean; error?: string }> {
+  const local = getSafeLocal<EmployeeWarning[]>(WARNINGS_LS_KEY, []);
+  const filtered = local.filter(w => w.id !== id);
+  setSafeLocal(WARNINGS_LS_KEY, filtered);
+
+  const supabase = getSupabaseClient();
+  if (!supabase) return { success: true };
+  try {
+    const { error } = await supabase.from('employee_warnings').delete().eq('id', id);
+    if (error) throw error;
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: formatSupabaseError(err, 'employee_warnings') };
+  }
+}
+
+/**
+ * Archives attendance records older than 24 months.
+ */
+export async function archiveOldAttendanceRecords(monthsThreshold: number = 24): Promise<{ success: boolean; count: number; error?: string }> {
+  const allRecords = getSafeLocal<any[]>(ATTENDANCE_LS_KEY, []);
+  const cutoffDate = new Date();
+  cutoffDate.setMonth(cutoffDate.getMonth() - monthsThreshold);
+  const cutoffStr = cutoffDate.toISOString().split('T')[0]; // YYYY-MM-DD
+
+  const toKeep = allRecords.filter(r => (r.attendance_date || r.date) >= cutoffStr);
+  const toArchive = allRecords.filter(r => (r.attendance_date || r.date) < cutoffStr);
+
+  if (toArchive.length > 0) {
+    const archivedList = getSafeLocal<any[]>('archive_attendance_records', []);
+    archivedList.push(...toArchive);
+    setSafeLocal('archive_attendance_records', archivedList);
+    setSafeLocal(ATTENDANCE_LS_KEY, toKeep);
+  }
+
+  const supabase = getSupabaseClient();
+  if (supabase) {
+    try {
+      const { data, error } = await supabase
+        .from('attendance_records')
+        .select('*')
+        .lt('attendance_date', cutoffStr);
+      if (error) throw error;
+
+      if (data && data.length > 0) {
+        const { error: upsertError } = await supabase
+          .from('archive_attendance_records')
+          .upsert(data);
+        if (upsertError) throw upsertError;
+
+        const { error: deleteError } = await supabase
+          .from('attendance_records')
+          .delete()
+          .lt('attendance_date', cutoffStr);
+        if (deleteError) throw deleteError;
+      }
+    } catch (err: any) {
+      console.warn('Supabase archive failed, localStorage active:', err);
+    }
+  }
+
+  return { success: true, count: toArchive.length };
+}
+
+/**
+ * Trims audit logs older than 36 months.
+ */
+export async function cleanOldAuditLogs(monthsThreshold: number = 36): Promise<{ success: boolean; count: number; error?: string }> {
+  const allLogs = getSafeLocal<AuditLog[]>('excel_erp_audit_logs', []);
+  const cutoffDate = new Date();
+  cutoffDate.setMonth(cutoffDate.getMonth() - monthsThreshold);
+
+  const toKeep = allLogs.filter(log => {
+    const logDate = log.created_at ? new Date(log.created_at) : new Date();
+    return logDate >= cutoffDate;
+  });
+  const toDeleteCount = allLogs.length - toKeep.length;
+
+  if (toDeleteCount > 0) {
+    setSafeLocal('excel_erp_audit_logs', toKeep);
+  }
+
+  const supabase = getSupabaseClient();
+  if (supabase) {
+    try {
+      const { error } = await supabase
+        .from('audit_logs')
+        .delete()
+        .lt('created_at', cutoffDate.toISOString());
+      if (error) throw error;
+    } catch (err: any) {
+      console.warn('Supabase log cleanup failed:', err);
+    }
+  }
+
+  return { success: true, count: toDeleteCount };
+}
+
 
 

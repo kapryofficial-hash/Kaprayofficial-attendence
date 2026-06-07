@@ -146,7 +146,8 @@ export function calculateAttendanceRecord(
     if (isSun) {
       overtimeHours = netHours; // All worked hours on Sunday are overtime
     } else {
-      overtimeHours = Math.max(0, netHours - requiredHours);
+      const overtimeThreshold = isFri ? 10.0 : requiredHours;
+      overtimeHours = Math.max(0, netHours - overtimeThreshold);
     }
   }
   overtimeHours = parseFloat(overtimeHours.toFixed(2));
@@ -344,33 +345,119 @@ export function downloadExcel(filename: string, headers: string[], rows: any[][]
  * Week is defined as Monday to Saturday.
  * Returns true if worked days + count of approved leaves >= 5.
  */
+export function getMonToSatDatesForDate(dateStr: string): string[] {
+  if (!dateStr) return [];
+  const dt = new Date(dateStr);
+  const day = dt.getDay(); // 0 (Sunday) to 6 (Saturday)
+  // Get offset to Monday of the same week
+  const toMonday = day === 0 ? -6 : 1 - day;
+  const monday = new Date(dt);
+  monday.setDate(dt.getDate() + toMonday);
+  
+  const dates: string[] = [];
+  for (let i = 0; i < 6; i++) {
+    const d = new Date(monday);
+    d.setDate(monday.getDate() + i);
+    const yStr = d.getFullYear();
+    const mStr = String(d.getMonth() + 1).padStart(2, '0');
+    const dStr = String(d.getDate()).padStart(2, '0');
+    dates.push(`${yStr}-${mStr}-${dStr}`);
+  }
+  return dates;
+}
+
+export function getSundayPaidOffStatus(
+  sundayDateStr: string,
+  allAttendanceRecords: { date: string; status: string; check_in?: string | null; check_out?: string | null; net_hours?: number; overtime_hours?: number }[]
+): { eligible: boolean; status: string; overtimeHours: number } {
+  const monToSatDates = getMonToSatDatesForDate(sundayDateStr);
+  
+  const weekRecords = allAttendanceRecords.filter(r => monToSatDates.includes(r.date || ''));
+  
+  let eligibleCount = 0;
+  monToSatDates.forEach(date => {
+    const rec = weekRecords.find(r => r.date === date);
+    if (rec) {
+      const stat = (rec.status || 'Absent').trim();
+      const statLower = stat.toLowerCase();
+      
+      const isEligible = 
+        statLower === 'present' || 
+        statLower === 'half-day' || 
+        statLower === 'leave' || 
+        statLower === 'approved leave' || 
+        statLower === 'paid leave' || 
+        statLower === 'sick leave' || 
+        statLower === 'emergency leave' || 
+        statLower === 'official approved off' ||
+        statLower === 'approved off';
+        
+      if (isEligible) {
+        eligibleCount++;
+      }
+    }
+  });
+
+  const isEligible = eligibleCount >= 5;
+  
+  const sundayRec = allAttendanceRecords.find(r => r.date === sundayDateStr);
+  const worked = !!(sundayRec && (sundayRec.check_in || sundayRec.check_out));
+  const netHours = sundayRec && sundayRec.net_hours ? sundayRec.net_hours : 0;
+  
+  let finalStatus = '';
+  let overtimeHours = 0;
+  
+  if (worked) {
+    overtimeHours = netHours; // all Sunday hours worked count as overtime
+    if (isEligible) {
+      finalStatus = 'Sunday Overtime';
+    } else {
+      finalStatus = 'Sunday Worked';
+    }
+  } else {
+    if (isEligible) {
+      finalStatus = 'Paid Weekly Off';
+    } else {
+      finalStatus = 'Unpaid Weekly Off';
+    }
+  }
+  
+  return {
+    eligible: isEligible,
+    status: finalStatus,
+    overtimeHours
+  };
+}
+
 export function calculateSundayEligibility(weekRecords: { status: string; date: string }[]): boolean {
-  let workedOrExcusedCount = 0;
+  let eligibleCount = 0;
   weekRecords.forEach(rec => {
     if (!rec.date) return;
     const dt = new Date(rec.date);
     const day = dt.getDay();
-    if (day === 0) return; // Ignore Sunday itself
+    if (day === 0) return; // ignore Sunday
 
     const stat = (rec.status || 'Absent').toLowerCase();
     
-    // Present, Half-Day, Missing Checkout are worked.
-    // Leaves like sick, emergency, paid leave, or general "leave" are approved/excused.
-    const countsAsWorked = 
-      stat.includes('present') || 
-      stat.includes('half') || 
-      stat.includes('missing') ||
-      stat.includes('sick') ||
-      stat.includes('emergency') ||
-      stat.includes('paid leave') ||
-      stat === 'leave';
+    // Eligible days include: Present, Half-Day, Approved Leave, Paid Leave, Official Approved Off
+    // NOT eligible: Unauthorized Absent, Missing Checkout, Unapproved Leave
+    const isEligible = 
+      stat === 'present' || 
+      stat === 'half-day' || 
+      stat === 'leave' || 
+      stat === 'approved leave' || 
+      stat === 'paid leave' || 
+      stat === 'sick leave' || 
+      stat === 'emergency leave' || 
+      stat === 'official approved off' ||
+      stat === 'approved off';
       
-    if (countsAsWorked) {
-      workedOrExcusedCount++;
+    if (isEligible) {
+      eligibleCount++;
     }
   });
 
-  return workedOrExcusedCount >= 5;
+  return eligibleCount >= 5;
 }
 
 /**
@@ -393,6 +480,24 @@ export function getMonthlyRequiredHours(year: number, month: number): number {
     }
   }
   return totalHours;
+}
+
+/**
+ * Returns list of Sunday dates as strings ('YYYY-MM-DD') for a given year and month (1-indexed month).
+ */
+export function getSundaysInMonth(year: number, month: number): string[] {
+  const sundays: string[] = [];
+  const daysInMonth = new Date(year, month, 0).getDate();
+  for (let d = 1; d <= daysInMonth; d++) {
+    const dt = new Date(year, month - 1, d);
+    if (dt.getDay() === 0) {
+      const yStr = dt.getFullYear();
+      const mStr = String(dt.getMonth() + 1).padStart(2, '0');
+      const dStr = String(dt.getDate()).padStart(2, '0');
+      sundays.push(`${yStr}-${mStr}-${dStr}`);
+    }
+  }
+  return sundays;
 }
 
 

@@ -37,9 +37,10 @@ interface AdminDashboardProps {
   employees: DbEmployee[];
   attendance: DbAttendance[];
   onFilterTrigger?: (filterName: string, value: any) => void;
+  employeeWarnings?: any[];
 }
 
-export function AdminDashboard({ employees, attendance, onFilterTrigger }: AdminDashboardProps) {
+export function AdminDashboard({ employees, attendance, onFilterTrigger, employeeWarnings = [] }: AdminDashboardProps) {
   // Current designated date for today analytics
   const todayStr = useMemo(() => {
     return new Date().toISOString().split('T')[0];
@@ -50,6 +51,23 @@ export function AdminDashboard({ employees, attendance, onFilterTrigger }: Admin
   const [selectedYear, setSelectedYear] = useState('2026');
   const [focusedEmployeeId, setFocusedEmployeeId] = useState<string>('All');
   const [isTestSuiteOpen, setIsTestSuiteOpen] = useState(true);
+  const [mounted, setMounted] = useState(false);
+
+  const activeWarningsList = useMemo(() => {
+    const activeWarns = (employeeWarnings || []).filter((w: any) => w.status === 'Active');
+    return activeWarns.map((w: any) => {
+      const emp = employees.find(e => e.id === w.employee_id);
+      return {
+        ...w,
+        employeeName: emp ? emp.name : 'Unknown Employee',
+        employeeDept: emp ? (emp.department || emp.department_name || 'Unassigned') : 'Unassigned'
+      };
+    });
+  }, [employeeWarnings, employees]);
+
+  React.useEffect(() => {
+    setMounted(true);
+  }, []);
 
   // Policy validation test suite results running dynamically
   const testSuiteResults = useMemo(() => {
@@ -146,15 +164,15 @@ export function AdminDashboard({ employees, attendance, onFilterTrigger }: Admin
       },
       {
         id: 'Test 7',
-        description: 'Friday Half-Day Shift: Extra overtime logged',
+        description: 'Friday Overtime: Starts only after 10 working hours',
         dayType: 'Friday',
         checkIn: '3:00 PM',
-        checkOut: '11:00 PM',
+        checkOut: '2:00 AM',
         dateStr: '2026-06-05',
         expected: {
           style: 'On Time',
           lateMinutes: 0,
-          netHours: 8.0,
+          netHours: 11.0,
           shortHours: 0,
           overtime: 1.0
         }
@@ -907,6 +925,53 @@ export function AdminDashboard({ employees, attendance, onFilterTrigger }: Admin
 
       </div>
 
+      {/* Disciplinary & Infractions Dashboard Block */}
+      <div className="bg-white rounded-xl p-5 border border-slate-200">
+        <h5 className="font-bold text-xs text-rose-850 uppercase tracking-widest flex items-center gap-2 mb-3 border-b border-rose-100 pb-2">
+          <AlertTriangle className="h-5 w-5 text-rose-600 animate-pulse" />
+          Employees With Active Warnings ({activeWarningsList.length})
+        </h5>
+        
+        {activeWarningsList.length === 0 ? (
+          <p className="text-xs text-slate-400 py-6 text-center font-medium font-sans">
+            Clean record sheets. Currently there are no staff members with active Verbal, Written, or Final disciplinary warnings on roster.
+          </p>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+            {activeWarningsList.map((warn: any) => (
+              <div 
+                key={warn.id}
+                onClick={() => onFilterTrigger?.('staff_report', warn.employee_id)}
+                className="border border-rose-200 hover:border-rose-400 bg-rose-50/10 rounded-xl p-3.5 flex flex-col justify-between hover:shadow-xs transition-all cursor-pointer relative overflow-hidden"
+              >
+                {warn.warning_type === 'Final Warning' && (
+                  <div className="absolute top-0 left-0 right-0 h-1 bg-rose-600 animate-pulse"></div>
+                )}
+                <div>
+                  <div className="flex items-center justify-between gap-1 mb-2">
+                    <span className="font-extrabold text-[10px] text-slate-800 tracking-tight block max-w-[120px] truncate">
+                      {warn.employeeName}
+                    </span>
+                    <span className={`text-[8px] font-black uppercase px-1.5 py-0.5 rounded ${
+                      warn.warning_type === 'Final Warning' ? 'bg-rose-100 text-rose-800' :
+                      warn.warning_type === 'Written Warning' ? 'bg-amber-100 text-amber-800' :
+                      'bg-slate-200 text-slate-800'
+                    }`}>
+                      {warn.warning_type}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-500 leading-normal font-semibold line-clamp-2">"{warn.reason}"</p>
+                </div>
+                <div className="text-[9px] text-slate-400 font-mono mt-3 pt-2 border-t flex justify-between font-bold">
+                  <span>Issued: {warn.date}</span>
+                  <span className="text-[8px] uppercase tracking-wider text-rose-600">Active</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* Main Charts & Visualizations Block */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         
@@ -925,18 +990,20 @@ export function AdminDashboard({ employees, attendance, onFilterTrigger }: Admin
               No registered logs for this selected period range to outline department chart.
             </div>
           ) : (
-            <div className="h-64">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={departmentBreakdown}>
-                  <XAxis dataKey="name" stroke="#64748b" fontSize={11} tickLine={false} />
-                  <YAxis stroke="#64748b" fontSize={11} tickLine={false} />
-                  <Tooltip contentStyle={{ fontSize: '11px', borderRadius: '8px' }} />
-                  <Legend wrapperStyle={{ fontSize: '10px' }} />
-                  <Bar dataKey="Presents" fill="#10b981" radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="Lates" fill="#f59e0b" radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="Absents" fill="#ef4444" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
+            <div className="w-full" style={{ minHeight: '300px', height: '300px', position: 'relative' }}>
+              {mounted && departmentBreakdown.length > 0 && (
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={departmentBreakdown}>
+                    <XAxis dataKey="name" stroke="#64748b" fontSize={11} tickLine={false} />
+                    <YAxis stroke="#64748b" fontSize={11} tickLine={false} />
+                    <Tooltip contentStyle={{ fontSize: '11px', borderRadius: '8px' }} />
+                    <Legend wrapperStyle={{ fontSize: '10px' }} />
+                    <Bar dataKey="Presents" fill="#10b981" radius={[4, 4, 0, 0]} />
+                    <Bar dataKey="Lates" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+                    <Bar dataKey="Absents" fill="#ef4444" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
             </div>
           )}
         </div>
@@ -1066,20 +1133,22 @@ export function AdminDashboard({ employees, attendance, onFilterTrigger }: Admin
             <div className="md:col-span-2 bg-slate-50 border border-slate-220 rounded-xl p-4">
               <span className="text-[11px] font-bold text-slate-700 block mb-3 uppercase tracking-wider">Historical Employee Core Metrics Comparison</span>
               
-              <div className="h-56">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={[
-                    { name: 'Presents', value: focusedWorkerInfo.presents },
-                    { name: 'Lates (Breached)', value: focusedWorkerInfo.lates },
-                    { name: 'Unclosed Checkouts', value: focusedWorkerInfo.missingCheckouts },
-                    { name: 'Absents Logged', value: focusedWorkerInfo.absents }
-                  ]}>
-                    <XAxis dataKey="name" stroke="#64748b" fontSize={11} />
-                    <YAxis stroke="#64748b" fontSize={11} />
-                    <Tooltip />
-                    <Line type="monotone" dataKey="value" stroke="#8b5cf6" strokeWidth={3} activeDot={{ r: 6 }} />
-                  </LineChart>
-                </ResponsiveContainer>
+              <div className="w-full" style={{ minHeight: '300px', height: '300px', position: 'relative' }}>
+                {mounted && (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={[
+                      { name: 'Presents', value: focusedWorkerInfo.presents },
+                      { name: 'Lates (Breached)', value: focusedWorkerInfo.lates },
+                      { name: 'Unclosed Checkouts', value: focusedWorkerInfo.missingCheckouts },
+                      { name: 'Absents Logged', value: focusedWorkerInfo.absents }
+                    ]}>
+                      <XAxis dataKey="name" stroke="#64748b" fontSize={11} />
+                      <YAxis stroke="#64748b" fontSize={11} />
+                      <Tooltip />
+                      <Line type="monotone" dataKey="value" stroke="#8b5cf6" strokeWidth={3} activeDot={{ r: 6 }} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                )}
               </div>
             </div>
 

@@ -27,10 +27,16 @@ import {
   ChevronDown,
   X
 } from 'lucide-react';
+import { EmployeeLedger } from './EmployeeLedger';
 
 interface ReportViewProps {
   employees: DbEmployee[];
   attendance: DbAttendance[];
+  commissions?: any[];
+  allowances?: any[];
+  salaryReviews?: any[];
+  ownerAdjustments?: any[];
+  auditLogs?: any[];
   initialFilters?: {
     searchQuery?: string;
     selectedDept?: string;
@@ -45,14 +51,24 @@ interface ReportViewProps {
     onlyMissingCheckout?: boolean;
     onlyNeedsAttention?: boolean;
     onlyHighPerformance?: boolean;
-    activeTab?: 'daily' | 'monthly-performance';
+    activeTab?: 'daily' | 'monthly-performance' | 'ledger';
   } | null;
   onClearInitialFilters?: () => void;
 }
 
-export function ReportView({ employees, attendance, initialFilters, onClearInitialFilters }: ReportViewProps) {
+export function ReportView({ 
+  employees, 
+  attendance, 
+  commissions = [], 
+  allowances = [], 
+  salaryReviews = [], 
+  ownerAdjustments = [],
+  auditLogs = [],
+  initialFilters, 
+  onClearInitialFilters 
+}: ReportViewProps) {
   // Navigation tabs
-  const [activeSubTab, setActiveSubTab] = useState<'daily' | 'monthly-performance'>('daily');
+  const [activeSubTab, setActiveSubTab] = useState<'daily' | 'monthly-performance' | 'ledger'>('daily');
 
   // Broad filter states
   const [searchQuery, setSearchQuery] = useState('');
@@ -545,7 +561,7 @@ export function ReportView({ employees, attendance, initialFilters, onClearIniti
           Day-by-Day Attendance Logs
         </button>
         <button
-          onClick={() => setActiveSubTab('monthly-performance')}
+          onClick={() => { setActiveSubTab('monthly-performance'); setSelectedMonthlyEmpId(null); }}
           className={`px-5 py-3.5 font-bold text-xs select-none cursor-pointer transition-all border-b-2 flex items-center gap-2 ${
             activeSubTab === 'monthly-performance' 
               ? 'border-emerald-600 text-emerald-700 font-extrabold bg-emerald-50/20' 
@@ -554,6 +570,17 @@ export function ReportView({ employees, attendance, initialFilters, onClearIniti
         >
           <Award className="h-4 w-4" />
           Employee Monthly Performance Summary ({filterMonth}/{filterYear})
+        </button>
+        <button
+          onClick={() => { setActiveSubTab('ledger'); setSelectedMonthlyEmpId(null); }}
+          className={`px-5 py-3.5 font-bold text-xs select-none cursor-pointer transition-all border-b-2 flex items-center gap-2 ${
+            activeSubTab === 'ledger' 
+              ? 'border-emerald-600 text-emerald-700 font-extrabold bg-emerald-50/20' 
+              : 'border-transparent text-slate-500 hover:text-slate-800'
+          }`}
+        >
+          <FileText className="h-4 w-4" />
+          📖 Staff Individual Ledger Sheet (PKR base)
         </button>
       </div>
 
@@ -1052,6 +1079,19 @@ export function ReportView({ employees, attendance, initialFilters, onClearIniti
               </div>
             )}
           </div>
+        )}
+
+        {/* Tab 3: Individual Employee General Ledger Sheet */}
+        {activeSubTab === 'ledger' && (
+          <EmployeeLedger 
+            employees={employees}
+            attendance={attendance}
+            commissions={commissions}
+            allowances={allowances}
+            salaryReviews={salaryReviews}
+            ownerAdjustments={ownerAdjustments}
+            auditLogs={auditLogs}
+          />
         )}
 
       </div>
