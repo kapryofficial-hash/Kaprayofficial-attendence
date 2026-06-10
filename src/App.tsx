@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   getSupabaseCredentials, 
   getSupabaseClient,
@@ -58,7 +58,8 @@ import {
   calculateSundayEligibility,
   getMonthlyRequiredHours,
   getSundayPaidOffStatus,
-  getSundaysInMonth
+  getSundaysInMonth,
+  getSmartBonusRecommendation
 } from './utils';
 import { EmployeeCommission, EmployeeAllowance, AllowedUserRole, UserProfile, SalaryReview, OwnerAdjustment, EmployeeDocument, EmployeeAdvance, AdvanceRecovery, EmployeeWarning } from './types';
 import { SqlConfigModal } from './components/SqlConfigModal';
@@ -109,7 +110,7 @@ import {
 
 export default function App() {
   // Navigation
-  const [activeTab, setActiveTab ] = useState<'dashboard' | 'daily' | 'staff' | 'monthly' | 'reports' | 'recycle' | 'users' | 'rules'>('dashboard');
+  const [activeTab, setActiveTab ] = useState<'dashboard' | 'daily' | 'staff' | 'monthly' | 'reports' | 'recycle' | 'users' | 'rules' | 'diagnostics'>('dashboard');
 
   // Supabase state
   const [dbConfig, setDbConfig] = useState(getSupabaseCredentials());
@@ -211,8 +212,14 @@ export default function App() {
         if (initSession && initSession.user) {
           console.log('AUTH_SIGNED_IN');
           setSession(initSession);
-          setCurrentUser(initSession.user);
-          setUser(initSession.user);
+          setCurrentUser(prev => {
+            if (prev && prev.id === initSession.user.id) return prev;
+            return initSession.user;
+          });
+          setUser(prev => {
+            if (prev && prev.id === initSession.user.id) return prev;
+            return initSession.user;
+          });
           setIsRoleLoading(true);
           setAuthError(null);
 
@@ -356,8 +363,14 @@ export default function App() {
       if (session && session.user) {
         console.log('AUTH_SIGNED_IN');
         setSession(session);
-        setCurrentUser(session.user);
-        setUser(session.user);
+        setCurrentUser(prevUser => {
+          if (prevUser && prevUser.id === session.user.id) return prevUser;
+          return session.user;
+        });
+        setUser(prevUser => {
+          if (prevUser && prevUser.id === session.user.id) return prevUser;
+          return session.user;
+        });
         setIsRoleLoading(true);
         setAuthError(null);
         
@@ -540,8 +553,10 @@ export default function App() {
       { id: 'staff', roles: ['super_admin', 'admin'] },
       { id: 'monthly', roles: ['super_admin', 'admin'] },
       { id: 'reports', roles: ['super_admin', 'admin', 'manager', 'staff_viewer'] },
+      { id: 'rules', roles: ['super_admin', 'admin', 'manager', 'staff_viewer'] },
       { id: 'recycle', roles: ['super_admin', 'admin'] },
-      { id: 'users', roles: ['super_admin'] }
+      { id: 'users', roles: ['super_admin'] },
+      { id: 'diagnostics', roles: ['super_admin'] }
     ].filter(t => t.roles.includes(userRole)).map(t => t.id);
 
     if (!permittedTabs.includes(activeTab)) {
@@ -916,26 +931,44 @@ export default function App() {
   };
 
   // Sync / Fetch sequence
-  const reloadAllData = async () => {
+  const reloadAllData = async (trigger: string = 'MANUAL') => {
+    console.log(`SYNC_TRIGGER_${trigger}`);
     setIsLoading(true);
     setDbError(null);
     try {
       const dbUrlSet = !!dbConfig.url && !!dbConfig.key;
       setDbConnected(dbUrlSet);
 
-      const empRes = await loadEmployees(false); // only non-deleted
-      const attRes = await loadAttendance(false); // only child records
-      const reportsRes = await loadMonthlyReports();
-      const deptRes = await loadDepartments(false);
-      const commRes = await loadCommissions();
-      const allowRes = await loadAllowances();
-      const reviewsRes = await loadSalaryReviews();
-      const adjRes = await loadOwnerAdjustments();
-      const logsRes = await loadAuditLogs();
-      const docRes = await loadEmployeeDocuments();
-      const advRes = await loadEmployeeAdvances();
-      const recRes = await loadAdvanceRecoveries();
-      const warnRes = await loadEmployeeWarnings();
+      // Decoupled parallel table loading for enhanced performance
+      const [
+        empRes,
+        attRes,
+        reportsRes,
+        deptRes,
+        commRes,
+        allowRes,
+        reviewsRes,
+        adjRes,
+        logsRes,
+        docRes,
+        advRes,
+        recRes,
+        warnRes
+      ] = await Promise.all([
+        loadEmployees(false),
+        loadAttendance(false),
+        loadMonthlyReports(),
+        loadDepartments(false),
+        loadCommissions(),
+        loadAllowances(),
+        loadSalaryReviews(),
+        loadOwnerAdjustments(),
+        loadAuditLogs(),
+        loadEmployeeDocuments(),
+        loadEmployeeAdvances(),
+        loadAdvanceRecoveries(),
+        loadEmployeeWarnings()
+      ]);
 
       setEmployees(empRes.data);
       setAttendance(attRes.data);
@@ -980,11 +1013,69 @@ export default function App() {
     }
   };
 
+  const isFirstLoadRef = useRef(false);
+
   useEffect(() => {
     if (currentUser && userRole) {
-      reloadAllData();
+      if (!isFirstLoadRef.current) {
+        isFirstLoadRef.current = true;
+        reloadAllData('LOGIN');
+      }
+    } else {
+      isFirstLoadRef.current = false;
     }
   }, [dbConfig, currentUser, userRole]);
+
+  // Scheduled background refresh (5 minutes)
+  useEffect(() => {
+    if (currentUser && userRole) {
+      const interval = setInterval(() => {
+        reloadAllData('TIMER');
+      }, 5 * 60 * 1000);
+      return () => clearInterval(interval);
+    }
+  }, [currentUser, userRole]);
+
+  // Lightweight verification when browser regains focus or tab is changed back
+  const performLightweightValidation = async () => {
+    console.log('SYNC_TRIGGER_LIGHTWEIGHT_VALIDATION');
+    const supabase = getSupabaseClient();
+    if (!supabase) {
+      console.log('LIGHTWEIGHT_VALIDATION_SUCCESS (Offline mode)');
+      return;
+    }
+    try {
+      // Single extremely micro read query to test database connection responsiveness and state validation
+      const { data, error } = await supabase.from('profiles').select('user_id').limit(1);
+      if (error) {
+        console.warn('Lightweight validation response:', error);
+      } else {
+        console.log('LIGHTWEIGHT_VALIDATION_SUCCESS (Online mode)');
+      }
+    } catch (e) {
+      console.warn('Lightweight validation check exception:', e);
+    }
+  };
+
+  useEffect(() => {
+    const handleFocus = () => {
+      performLightweightValidation();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        performLightweightValidation();
+      }
+    };
+
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
 
   // Read-only indicator status for archived months (Requirement 3)
   const monthWorkflowStatus = useMemo(() => {
@@ -1045,7 +1136,26 @@ export default function App() {
     const mergedIn = draft.checkIn !== undefined ? draft.checkIn : (current ? current.check_in : '');
     const mergedOut = draft.checkOut !== undefined ? draft.checkOut : (current ? current.check_out : '');
     const mergedManual = draft.manualStatus !== undefined ? draft.manualStatus : (current ? current.manual_status : 'Auto');
-    const mergedRemarks = draft.remarks !== undefined ? draft.remarks : (current ? current.remarks : '');
+    let mergedRemarks = draft.remarks !== undefined ? draft.remarks : (current ? current.remarks : '');
+
+    const isWaiverStatus = [
+      'Approved Late',
+      'Approved Short Hours',
+      'Approved Late + Short Hours',
+      'Official Early Release',
+      'Medical Emergency',
+      'System / Machine Error',
+      'Official Duty',
+      'Paid Leave',
+      'Unpaid Leave'
+    ].includes(mergedManual);
+
+    if (isWaiverStatus && mergedManual !== (current ? current.manual_status : 'Auto')) {
+      const reason = window.prompt(`Please provide a reason for the Admin Action/Approval (${mergedManual}):`) || 'Approved by Admin';
+      const adminName = currentUser ? (currentUser.email || 'Admin') : 'Super Admin';
+      const timestamp = new Date().toLocaleString();
+      mergedRemarks = `Approved by ${adminName} at ${timestamp}. Reason: ${reason}`;
+    }
 
     // Calculate metrics using standard KaprayOfficial formulas
     const calculated = calculateAttendanceRecord(mergedIn || null, mergedOut || null, selectedDate, mergedManual);
@@ -1242,7 +1352,7 @@ export default function App() {
       const updated = await loadEmployees(false);
       setEmployees(updated.data);
       setEditingEmployee(updatedEmp); // update active modal context
-      await reloadAllData();
+      await reloadAllData('SAVE');
     } else {
       throw new Error(res.error || 'Database write failure');
     }
@@ -1579,7 +1689,7 @@ export default function App() {
       }
 
       setDeleteTarget(null);
-      await reloadAllData();
+      await reloadAllData('SAVE');
     } catch (err: any) {
       alert(`Deletion process could not build: ${err.message}`);
     } finally {
@@ -1608,7 +1718,7 @@ export default function App() {
         record_id: fullAdj.id,
         new_data: fullAdj
       });
-      await reloadAllData();
+      await reloadAllData('SAVE');
     }
   };
 
@@ -1627,7 +1737,7 @@ export default function App() {
         record_id: id,
         new_data: { id }
       });
-      await reloadAllData();
+      await reloadAllData('SAVE');
     }
   };
 
@@ -1653,7 +1763,7 @@ export default function App() {
         record_id: id,
         new_data: updated
       });
-      await reloadAllData();
+      await reloadAllData('SAVE');
     }
   };
 
@@ -1729,7 +1839,7 @@ export default function App() {
             old_data: enforcedReason ? JSON.stringify({ unlock_reason: enforcedReason, unlocked_at: new Date().toISOString(), unlocked_by: currentUser.email }) : null
           });
         }
-        await reloadAllData();
+        await reloadAllData('SAVE');
         alert(`Month Worksheet status successfully advanced to [${newStatus}]!`);
       } else {
         alert(`Failed to save: ${res.error}`);
@@ -1770,7 +1880,10 @@ export default function App() {
         status: a.status || '',
         late_minutes: a.late_minutes || 0,
         net_hours: a.net_hours || 0,
-        overtime_hours: a.overtime_hours || 0
+        overtime_hours: a.overtime_hours || 0,
+        short_hours: a.short_hours || 0,
+        manual_status: a.manual_status || 'Auto',
+        date: a.date
       })));
       const performanceScore = scoreObj.score;
 
@@ -1785,8 +1898,8 @@ export default function App() {
       
       let paidWeeklyOffs = 0;
       let unpaidWeeklyOffs = 0;
-      let sundayOvertimeHours = 0;
       let sundayWorkedCount = 0;
+      let sundayWorkedHours = 0;
       
       const employeeAllAttendance = attendance.filter(a => a.employee_id === emp.id && !a.is_deleted);
       
@@ -1797,14 +1910,9 @@ export default function App() {
           paidWeeklyOffs++;
         } else if (statusDetails.status === 'Unpaid Weekly Off') {
           unpaidWeeklyOffs++;
-        } else if (statusDetails.status === 'Sunday Overtime') {
-          paidWeeklyOffs++;
-          sundayOvertimeHours += statusDetails.overtimeHours;
-          sundayWorkedCount++;
         } else if (statusDetails.status === 'Sunday Worked') {
-          unpaidWeeklyOffs++;
-          sundayOvertimeHours += statusDetails.overtimeHours;
           sundayWorkedCount++;
+          sundayWorkedHours += statusDetails.workedHours || 0;
         }
       });
 
@@ -1816,7 +1924,16 @@ export default function App() {
 
       const regularShortHours = empMonthAttendance.filter(a => {
         const dt = new Date(a.date);
-        return dt.getDay() !== 0; // Not Sunday
+        if (dt.getDay() === 0) return false;
+        const isApprovedShort = [
+          'Approved Short Hours',
+          'Approved Late + Short Hours',
+          'Official Early Release',
+          'Medical Emergency',
+          'System / Machine Error',
+          'Official Duty'
+        ].includes(a.manual_status || '');
+        return !isApprovedShort;
       }).reduce((acc, a) => acc + (a.short_hours || 0), 0);
 
       const adjustedShortHours = Math.max(0, regularShortHours - regularOvertimeHours);
@@ -1824,14 +1941,16 @@ export default function App() {
 
       // Deduct for any absent days (not Sunday) and unpaid weekly offs per PKR ERP standards
       const absentDaysVal = absents;
+      const unpaidLeavesCount = empMonthAttendance.filter(a => a.manual_status === 'Unpaid Leave').length;
       const absentDeduction = absentDaysVal * (basicSalary / 30);
       const unpaidWeeklyOffDeduction = unpaidWeeklyOffs * (basicSalary / 30);
+      const unpaidLeaveDeduction = unpaidLeavesCount * (basicSalary / 30);
 
       const timingBasedSalaryBase = Math.max(0, basicSalary - (adjustedShortHours * hourlyRate));
-      const timingBasedSalary = Math.max(0, timingBasedSalaryBase - absentDeduction - unpaidWeeklyOffDeduction);
+      const timingBasedSalary = Math.max(0, timingBasedSalaryBase - absentDeduction - unpaidWeeklyOffDeduction - unpaidLeaveDeduction);
       
       const regularOvertimePay = netPayableOvertimeHours * hourlyRate;
-      const sundayOvertimePay = sundayOvertimeHours * hourlyRate;
+      const sundayOvertimePay = 0; // Sundays never count as overtime pay
 
       // Approved commissions
       const empComms = commissions.filter(c => c.employee_id === emp.id && c.month === m && c.year === y && c.approved_by);
@@ -1862,8 +1981,8 @@ export default function App() {
       };
 
       // Policy Rule 4: No automatic final salary deduction for: Missing checkout, Sunday unpaid off, Late, Short hours.
-      // Thus, finalSalary before manual adjustment only automatically deducts standard workday absents.
-      const finalTimingBasedSalary = Math.max(0, basicSalary - absentDeduction);
+      // Thus, finalSalary before manual adjustment only automatically deducts standard workday absents and unpaid Sundays.
+      const finalTimingBasedSalary = Math.max(0, basicSalary - absentDeduction - unpaidWeeklyOffDeduction - unpaidLeaveDeduction);
       const finalSalary = Math.round(finalTimingBasedSalary + regularOvertimePay + sundayOvertimePay + commissionAmount + totalAllowances + Number(reviewRecord.amount));
 
       return {
@@ -1875,15 +1994,16 @@ export default function App() {
         absents,
         paidWeeklyOffs,
         unpaidWeeklyOffs,
-        sundayOvertimeHours,
+        sundayWorkedHours,
         sundayWorkedCount,
+        sundayOvertimeHours: 0,
         requiredHours: reqHours,
         hourlyRate,
         regularShortHours,
         regularOvertimeHours,
         totalShortHours: regularShortHours,
-        totalOvertimeHours: regularOvertimeHours + sundayOvertimeHours,
-        overtimeHours: regularOvertimeHours + sundayOvertimeHours,
+        totalOvertimeHours: regularOvertimeHours,
+        overtimeHours: regularOvertimeHours,
         shortHours: regularShortHours,
         adjustedShortHours,
         netPayableOvertimeHours,
@@ -1899,6 +2019,7 @@ export default function App() {
         suggestedFinalSalary: parseFloat(suggestedFinalSalary.toFixed(2)),
         attendancePercentage,
         performanceScore,
+        scoreObj,
         calculatedSalary: parseFloat(suggestedFinalSalary.toFixed(2)), // compatibility fallback
         review: reviewRecord,
         adjustment: { amount: reviewRecord.amount, approved: reviewRecord.status !== 'Draft', reason: reviewRecord.reason, status: reviewRecord.status }, // legacy mapping
@@ -1923,7 +2044,11 @@ export default function App() {
     const recordsToSave: DbAttendance[] = [];
     const statusMapSaving: Record<string, 'saving'> = {};
     
-    unsavedKeys.forEach(recordId => {
+    const adminName = currentUser ? (currentUser.email || 'Admin') : 'Super Admin';
+    const timestamp = new Date().toLocaleString();
+
+    for (let i = 0; i < unsavedKeys.length; i++) {
+      const recordId = unsavedKeys[i];
       const empId = recordId.split('_')[0];
       const draft = draftEdits[recordId] || {};
       const current = attendance.find(a => a.id === recordId && !a.is_deleted);
@@ -1931,7 +2056,30 @@ export default function App() {
       const mergedIn = draft.checkIn !== undefined ? draft.checkIn : (current ? current.check_in : '');
       const mergedOut = draft.checkOut !== undefined ? draft.checkOut : (current ? current.check_out : '');
       const mergedManual = draft.manualStatus !== undefined ? draft.manualStatus : (current ? current.manual_status : 'Auto');
-      const mergedRemarks = draft.remarks !== undefined ? draft.remarks : (current ? current.remarks : '');
+      let mergedRemarks = draft.remarks !== undefined ? draft.remarks : (current ? current.remarks : '');
+
+      const isWaiverStatus = [
+        'Approved Late',
+        'Approved Short Hours',
+        'Approved Late + Short Hours',
+        'Official Early Release',
+        'Medical Emergency',
+        'System / Machine Error',
+        'Official Duty',
+        'Paid Leave',
+        'Unpaid Leave'
+      ].includes(mergedManual);
+
+      if (isWaiverStatus && mergedManual !== (current ? current.manual_status : 'Auto')) {
+        const empName = employees.find(e => e.id === empId)?.name || 'Employee';
+        const reason = window.prompt(`Please provide a reason for the Admin Action/Approval (${mergedManual}) for ${empName}:`);
+        if (reason === null) {
+          // User cancelled bulk operation
+          setIsLoading(false);
+          return;
+        }
+        mergedRemarks = `Approved by ${adminName} at ${timestamp}. Reason: ${reason || 'Approved'}`;
+      }
 
       const calculated = calculateAttendanceRecord(mergedIn || null, mergedOut || null, selectedDate, mergedManual);
 
@@ -1956,7 +2104,7 @@ export default function App() {
 
       recordsToSave.push(updatedRecord);
       statusMapSaving[recordId] = 'saving';
-    });
+    }
 
     setSaveStatus(prev => ({ ...prev, ...statusMapSaving }));
 
@@ -2220,7 +2368,7 @@ export default function App() {
               </div>
             </div>
             <button 
-              onClick={() => reloadAllData()}
+              onClick={() => reloadAllData('MANUAL')}
               className="bg-white hover:bg-rose-50 text-rose-700 active:scale-95 px-4 py-1.5 rounded-lg font-black tracking-tight text-xs flex items-center gap-1.5 shadow transition-all cursor-pointer select-none"
             >
               🔄 Retry Connection
@@ -2302,6 +2450,9 @@ export default function App() {
                 attendance={attendance}
                 onFilterTrigger={handleDashboardFilterTrigger}
                 employeeWarnings={employeeWarnings}
+                salaryReviews={salaryReviews}
+                commissions={commissions}
+                onReloadData={reloadAllData}
               />
             )}
 
@@ -2410,7 +2561,14 @@ export default function App() {
 
                                 {/* Name Display */}
                                 <td className="p-3 border-r border-slate-200 font-medium font-sans text-slate-800">
-                                  {emp.name}
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingEmployee(emp)}
+                                    className="font-bold text-emerald-700 hover:text-emerald-900 hover:underline text-left cursor-pointer transition-colors"
+                                    title="Click to open Quick View Drawer"
+                                  >
+                                    {emp.name}
+                                  </button>
                                   {!emp.active && (
                                     <span className="text-[9px] bg-red-105 bg-red-100 text-red-750 px-1.5 py-0.5 rounded font-bold ml-1">Disabled</span>
                                   )}
@@ -2471,6 +2629,15 @@ export default function App() {
                                     <option value="Absent">Absent (Zero Pay)</option>
                                     <option value="Leave">Compensated Leave</option>
                                     <option value="Off">Weekly Rest day</option>
+                                    <option value="Approved Late">Approved Late</option>
+                                    <option value="Approved Short Hours">Approved Short Hours</option>
+                                    <option value="Approved Late + Short Hours">Approved Late + Short Hours</option>
+                                    <option value="Official Early Release">Official Early Release</option>
+                                    <option value="Medical Emergency">Medical Emergency</option>
+                                    <option value="System / Machine Error">System / Machine Error</option>
+                                    <option value="Official Duty">Official Duty</option>
+                                    <option value="Paid Leave">Paid Leave</option>
+                                    <option value="Unpaid Leave">Unpaid Leave</option>
                                   </select>
                                 </td>
 
@@ -2670,7 +2837,16 @@ export default function App() {
                               
                               <td className="p-3 border-r border-slate-200 font-bold font-mono text-slate-700">{emp.id}</td>
                               
-                              <td className="p-3 border-r border-slate-200 font-bold text-slate-900">{emp.name}</td>
+                              <td className="p-3 border-r border-slate-200 font-medium font-sans text-slate-850">
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingEmployee(emp)}
+                                  className="font-bold text-emerald-700 hover:text-emerald-905 hover:underline text-left cursor-pointer transition-colors"
+                                  title="Click to open Quick View Drawer"
+                                >
+                                  {emp.name}
+                                </button>
+                              </td>
                               
                               <td className="p-3 border-r border-slate-200 font-mono text-slate-500">{emp.email || '-'}</td>
                               
@@ -2977,9 +3153,42 @@ export default function App() {
                               </td>
                               
                               <td className="p-3 border-r border-slate-200 text-center font-sans">
-                                <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold ${row.performanceScore >= 90 ? 'bg-emerald-100 text-emerald-800' : row.performanceScore >= 75 ? 'bg-blue-100 text-blue-800' : 'bg-rose-100 text-rose-800'}`}>
-                                  {row.performanceScore}
-                                </span>
+                                <div className="flex flex-col items-center gap-1">
+                                  <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold ${row.performanceScore >= 90 ? 'bg-emerald-100 text-emerald-800' : row.performanceScore >= 75 ? 'bg-blue-100 text-blue-800' : 'bg-rose-100 text-rose-800'}`}>
+                                    {row.performanceScore} / 100
+                                  </span>
+                                  <span className="text-[9px] font-bold text-slate-500 uppercase tracking-tight">
+                                    Grade: {row.performanceScore >= 90 ? 'A+' : row.performanceScore >= 75 ? 'B' : 'C'}
+                                  </span>
+                                  <span className="text-[8px] text-slate-450 leading-tight">
+                                    {row.scoreObj?.remarks || 'Good Rating'}
+                                  </span>
+                                  {row.scoreObj?.breakdown && (
+                                    <div className="text-[8px] text-left text-slate-500 mt-1 max-w-[160px] font-mono leading-tight border-t border-slate-100 pt-1 flex flex-col gap-0.5">
+                                      {row.scoreObj.breakdown.late_days > 0 && <div className="text-rose-600">• Lates: {row.scoreObj.breakdown.late_days}d (-{row.scoreObj.breakdown.late_days * 2})</div>}
+                                      {row.scoreObj.breakdown.short_days > 0 && <div className="text-rose-600">• Short Hours: {row.scoreObj.breakdown.short_days}d (-{row.scoreObj.breakdown.short_days * 1})</div>}
+                                      {row.scoreObj.breakdown.absent_days > 0 && <div className="text-red-700 font-bold">• Absent: {row.scoreObj.breakdown.absent_days}d (-{row.scoreObj.breakdown.absent_days * 10})</div>}
+                                      {row.scoreObj.breakdown.missing_checkout > 0 && <div className="text-red-600">• Miss Checkout: {row.scoreObj.breakdown.missing_checkout}d (-{row.scoreObj.breakdown.missing_checkout * 5})</div>}
+                                      {row.scoreObj.breakdown.sunday_bonus > 0 && <div className="text-emerald-700 font-bold">• Sunday: +{row.scoreObj.breakdown.sunday_bonus} pts</div>}
+                                      {row.scoreObj.breakdown.perfect_attendance && <div className="text-emerald-700 font-bold">• Perfect Mo: +5 pts</div>}
+                                      {row.scoreObj.breakdown.excellent_attendance && <div className="text-emerald-500 font-semibold">• Excellent: +2 pts</div>}
+                                    </div>
+                                  )}
+                                  {(() => {
+                                    const rec = getSmartBonusRecommendation({
+                                      score: row.performanceScore,
+                                      attendancePercentage: row.attendancePercentage,
+                                      absentsCount: row.absents,
+                                      lateCount: row.scoreObj?.breakdown?.late_days
+                                    });
+                                    if (rec.recommendation === 'Standard Performance') return null;
+                                    return (
+                                      <div className={`mt-1.5 px-2 py-1 rounded text-[8px] font-sans font-bold border text-center leading-normal max-w-[155px] uppercase tracking-wider ${rec.color}`} title={rec.description}>
+                                        💡 {rec.recommendation}
+                                      </div>
+                                    );
+                                  })()}
+                                </div>
                               </td>
                               
                               <td className="p-3 border-r border-slate-200 bg-slate-50/60 font-sans text-left">
@@ -3394,7 +3603,7 @@ export default function App() {
             {activeTab === 'recycle' && (
               <RecycleBin 
                 isAdmin={isAdmin}
-                onRestoreHappened={reloadAllData}
+                onRestoreHappened={() => reloadAllData('SAVE')}
               />
             )}
 
@@ -3406,6 +3615,18 @@ export default function App() {
             {/* WORKSPACE 7: STAFF RULES AND COMPLIANCE POLICY GUIDE */}
             {activeTab === 'rules' && (
               <StaffRules />
+            )}
+
+            {/* WORKSPACE 8: ADMIN DIAGNOSTICS & SYSTEM COMPLIANCE TESTS */}
+            {activeTab === 'diagnostics' && userRole === 'super_admin' && (
+              <AdminDashboard 
+                employees={employees}
+                attendance={attendance}
+                employeeWarnings={employeeWarnings}
+                salaryReviews={salaryReviews}
+                commissions={commissions}
+                showDiagnosticsOnly={true}
+              />
             )}
 
           </div>
@@ -3542,7 +3763,7 @@ export default function App() {
         <CsvImporter 
           employees={employees}
           existingAttendance={attendance}
-          onImportComplete={reloadAllData}
+          onImportComplete={() => reloadAllData('SAVE')}
           onClose={() => setIsCsvImportOpen(false)}
         />
       )}

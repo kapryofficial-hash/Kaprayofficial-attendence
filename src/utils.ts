@@ -96,8 +96,23 @@ export function formatPKR(amount: number): string {
 }
 
 /**
- * Core Excel-like attendance calculations.
- * Returns: { netHours, lateMinutes, status }
+ * Checks if a date string falls on a Sunday.
+ * @param dateStr Format: YYYY-MM-DD
+ */
+export function isSunday(dateStr: string): boolean {
+  if (!dateStr) return false;
+  const match = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return false;
+  const y = parseInt(match[1], 10);
+  const m = parseInt(match[2], 10);
+  const d = parseInt(match[3], 10);
+  const dt = new Date(y, m - 1, d);
+  return dt.getDay() === 0; // 0 = Sunday
+}
+
+/**
+ * Excel-like attendance calculations.
+ * Returns: { netHours, lateMinutes, status, shortHours, overtimeHours }
  */
 export function calculateAttendanceRecord(
   checkIn: string | null,
@@ -106,7 +121,7 @@ export function calculateAttendanceRecord(
   manualStatus: string = 'Auto'
 ): { netHours: number; lateMinutes: number; status: string; shortHours: number; overtimeHours: number } {
   const isFri = isFriday(dateStr);
-  const isSun = !dateStr ? false : (new Date(dateStr).getDay() === 0);
+  const isSun = isSunday(dateStr);
   
   // Rules definitions
   const requiredHours = isSun ? 0 : (isFri ? 7.0 : 10.0);
@@ -114,15 +129,13 @@ export function calculateAttendanceRecord(
   
   let graceMins = 0;
   if (!isSun) {
-    // Normal: check-in 1:30 PM (13:30, 810 mins). Grace period: 15 min. Grace limit: 1:45 PM (13:45, 825 mins)
-    // Friday: check-in 3:00 PM (15:00, 900 mins). Grace period: 15 min. Grace limit: 3:15 PM (15:15, 915 mins)
-    graceMins = isFri ? (15 * 60 + 15) : (13 * 60 + 45);
+    graceMins = isFri ? (15 * 60 + 15) : (13 * 60 + 45); // Grace period: 15 min
   }
 
   let netHours = 0;
   let lateMinutes = 0;
 
-  // Calculate late minutes if check-in exists
+  // Calculate late minutes if check-in exists (Sundays are exempted)
   if (checkIn && !isSun) {
     const inMins = timeToMinutes(checkIn);
     if (inMins > graceMins) {
@@ -140,19 +153,15 @@ export function calculateAttendanceRecord(
     netHours = parseFloat(((outMins - inMins) / 60).toFixed(2));
   }
 
-  // Calculate Overtime
+  // Calculate Overtime (Sunday is NOT overtime)
   let overtimeHours = 0;
-  if (netHours > 0) {
-    if (isSun) {
-      overtimeHours = netHours; // All worked hours on Sunday are overtime
-    } else {
-      const overtimeThreshold = isFri ? 10.0 : requiredHours;
-      overtimeHours = Math.max(0, netHours - overtimeThreshold);
-    }
+  if (netHours > 0 && !isSun) {
+    const overtimeThreshold = isFri ? 10.0 : requiredHours;
+    overtimeHours = Math.max(0, netHours - overtimeThreshold);
   }
   overtimeHours = parseFloat(overtimeHours.toFixed(2));
 
-  // Calculate Short Hours
+  // Calculate Short Hours (Sunday is exempted)
   let shortHours = 0;
   if (netHours > 0 && !isSun) {
     if (netHours < toleranceLimit) {
@@ -163,8 +172,22 @@ export function calculateAttendanceRecord(
 
   // Determine attendance status
   let status = 'Absent';
-  if (manualStatus && manualStatus !== 'Auto') {
-    status = manualStatus;
+  const isWaiver = [
+    'Approved Late',
+    'Approved Short Hours',
+    'Approved Late + Short Hours',
+    'Official Early Release',
+    'Medical Emergency',
+    'System / Machine Error',
+    'Official Duty'
+  ].includes(manualStatus);
+
+  if (manualStatus && manualStatus !== 'Auto' && !isWaiver) {
+    if (manualStatus === 'Approved Leave' || manualStatus === 'Paid Leave' || manualStatus === 'Unpaid Leave') {
+      status = 'Leave';
+    } else {
+      status = manualStatus;
+    }
   } else {
     if (!checkIn) {
       status = isSun ? 'Off' : 'Absent';
@@ -172,7 +195,7 @@ export function calculateAttendanceRecord(
       status = 'Missing Checkout';
     } else {
       if (isSun) {
-        status = 'Present'; // Any check-in on Sunday with checkout counts as present
+        status = 'Sunday Worked'; // Any check-in on Sunday counts as Sunday Worked
       } else {
         const halfLimit = isFri ? 3.5 : 5.0;
         if (netHours >= toleranceLimit) {
@@ -198,7 +221,6 @@ export function calculateAttendanceRecord(
 /**
  * Calculates net salary based on simple Excel rules:
  * Net = (BaseSalary / 30) * (Presents_FullDays + (Half-Days * 0.5)) - manual advance/leaves/absents if needed.
- * This function calculates exact payable salary from a monthly attendance summary.
  */
 export function calculateExcelSalary(
   baseSalary: number,
@@ -213,80 +235,285 @@ export function calculateExcelSalary(
 
 /**
  * Calculates a professional Auto Performance Score out of 100
- * Rules:
- * - Deduction: Late (-2 points per incidence)
- * - Deduction: Absent (-10 points per incidence)
- * - Deduction: Missing Checkout (-5 points per incidence)
- * - Deduction: Short working hours < 10 hrs (-3 points per incidence)
- * - Extra Overtime points (+1 point per overtime shift)
- * - Bonus: Perfect attendance (+5 points)
+ * Rules in KaprayOfficial HRMS update:
+ * Deductions:
+ * - Absent Day = -15 (unapproved)
+ * - Missing Checkout = -5 (unapproved)
+ * - Late Day = -2 (unapproved)
+ * - Short Hours Day = -1 (unapproved)
+ * Bonuses:
+ * - Sunday Worked Day = +2 (max +8 per month)
+ * - Perfect Month Bonus = +5 (no unapproved absences, lates, short hours, or missing checkouts, min 5 working logs)
+ * - Excellent Attendance Bonus = +2 (no unapproved absences, missing checkouts, max 2 unapproved lates, min 5 logs)
+ * Score bounds:
+ * - Min: 0, Max: 100
  */
 export function calculatePerformanceScore(records: {
   status: string;
   late_minutes: number;
   net_hours: number;
   overtime_hours: number;
-}[]): { score: number; remarks: string } {
-  if (records.length === 0) return { score: 100, remarks: 'New profile: No records logged in this period.' };
-
+  short_hours?: number;
+  manual_status?: string | null;
+  date?: string;
+}[]): {
+  score: number;
+  remarks: string;
+  breakdown: {
+    baseScore: number;
+    lateCount: number;
+    latePenalty: number;
+    shortCount: number;
+    shortHoursPenalty: number;
+    absentCount: number;
+    absentPenalty: number;
+    missingCheckoutCount: number;
+    missingCheckoutPenalty: number;
+    sundayWorkedCount: number;
+    sundayWorkedBonus: number;
+    perfectBonus: number;
+    excellentBonus: number;
+    finalScore: number;
+    grade: string;
+    description: string;
+    // Compatibility properties
+    absent_days: number;
+    late_days: number;
+    short_days: number;
+    missing_checkout: number;
+    sunday_bonus: number;
+    perfect_attendance: boolean;
+    excellent_attendance: boolean;
+  };
+} {
   let score = 100;
-  let loggedWorkingDays = 0;
   
   let absentCount = 0;
-  let lateCount = 0;
   let missingCheckoutCount = 0;
+  let lateCount = 0;
+  let shortCount = 0;
+  let sundayWorkedCount = 0;
 
   records.forEach(r => {
-    const isAbs = r.status === 'Absent';
-    const isMc = r.status === 'Missing Checkout';
-    const isLeave = r.status === 'Leave';
-    const isOff = r.status === 'Off';
+    const stat = (r.status || '').trim();
+    const isSun = r.date ? isSunday(r.date) : (stat === 'Sunday Worked' || stat === 'Sunday Present');
+    const manual = r.manual_status || 'Auto';
 
-    if (r.status === 'Present' || r.status === 'Half-Day' || isLeave || isOff) {
-      loggedWorkingDays++;
+    if (isSun) {
+      if (stat === 'Sunday Worked' || stat === 'Sunday Present' || (stat && stat !== 'Off' && stat !== 'Absent' && stat !== 'Leave')) {
+        sundayWorkedCount++;
+      }
+      return; // Skip standard daily work penalties on Sundays
     }
 
+    const isAbs = stat === 'Absent';
+    const isMc = stat === 'Missing Checkout';
+
+    // Phase 3 - Approved exceptions that result in Penalty = 0
+    const isApprovedLeave = [
+      'Approved Leave',
+      'Medical Leave',
+      'Paid Leave',
+      'Unpaid Leave',
+      'Official Duty',
+      'Management Approved Exception'
+    ].includes(manual);
+    
     if (isAbs) {
-      score -= 5;
-      absentCount++;
+      if (!isApprovedLeave) {
+        absentCount++;
+      }
     } else if (isMc) {
-      score -= 2;
-      missingCheckoutCount++;
+      const isWaivedMc = [
+        'System / Machine Error',
+        'Official Duty',
+        'Management Approved Exception'
+      ].includes(manual);
+      if (!isWaivedMc) {
+        missingCheckoutCount++;
+      }
     }
 
-    if (r.late_minutes > 0 && !isAbs && !isLeave && !isOff) {
-      score -= 1;
-      lateCount++;
+    // Late counting (only if not off/absent/leave)
+    const isLate = r.late_minutes > 0 && stat !== 'Absent' && stat !== 'Leave' && stat !== 'Off';
+    if (isLate) {
+      const isWaivedLate = [
+        'Approved Late',
+        'Approved Late + Short Hours',
+        'Medical Emergency',
+        'System / Machine Error',
+        'Official Duty',
+        'Management Approved Exception',
+        'Medical Leave'
+      ].includes(manual);
+      
+      if (!isWaivedLate) {
+        lateCount++;
+      }
+    }
+
+    // Short working hours counting (only if not off/absent/leave)
+    const shortVal = r.short_hours !== undefined ? r.short_hours : 0;
+    const isShort = shortVal > 0 && stat !== 'Absent' && stat !== 'Leave' && stat !== 'Off';
+    if (isShort) {
+      const isWaivedShort = [
+        'Approved Short Hours',
+        'Approved Late + Short Hours',
+        'Official Early Release',
+        'Medical Emergency',
+        'System / Machine Error',
+        'Official Duty',
+        'Management Approved Exception',
+        'Medical Leave'
+      ].includes(manual);
+
+      if (!isWaivedShort) {
+        shortCount++;
+      }
     }
   });
 
-  // Apply bonuses
-  if (loggedWorkingDays >= 10) {
-    if (absentCount === 0 && lateCount === 0 && missingCheckoutCount === 0) {
-      score += 5; // Perfect Attendance
-    } else if (absentCount === 0 && lateCount <= 2 && missingCheckoutCount === 0) {
-      score += 2; // Excellent Attendance
+  // Score Deductions (Phase 2 - unapproved absent penalty calibrated to -15)
+  const absentPenalty = absentCount * -15;
+  const missingCheckoutPenalty = missingCheckoutCount * -5;
+  const latePenalty = lateCount * -2;
+  const shortHoursPenalty = shortCount * -1;
+  
+  score += (absentPenalty + missingCheckoutPenalty + latePenalty + shortHoursPenalty);
+
+  // Sunday Worked Bonus (+2 pts, cap at 8 pts max)
+  const sundayWorkedBonus = Math.min(8, sundayWorkedCount * 2);
+  score += sundayWorkedBonus;
+
+  // Perfect/Excellent Attendance logic
+  let perfectBonus = 0;
+  let excellentBonus = 0;
+  
+  // Need at least some attendance recordings to earn alignment bonuses
+  const totalLogsCount = records.filter(r => r.status && r.status !== 'Off').length;
+  if (totalLogsCount >= 5) {
+    if (absentCount === 0 && lateCount === 0 && missingCheckoutCount === 0 && shortCount === 0) {
+      perfectBonus = 5;
+      score += 5;
+    } else if (absentCount === 0 && lateCount <= 2 && missingCheckoutCount === 0 && shortCount === 0) {
+      excellentBonus = 2;
+      score += 2;
     }
   }
 
-  // Restrict bounds strictly to [0, 100]
+  // Phase 2 - Score bounds strictly enforced
   score = Math.max(0, Math.min(100, score));
 
-  // Determine Auto Remarks
+  // Phase 5 - Performance Grading Scale
+  let grade = 'F';
   let remarks = '';
   if (score >= 95) {
-    remarks = 'Excellent performance. Exceptional punctuality, diligence, and highly reliable stars.';
-  } else if (score >= 85) {
-    remarks = 'Good performance. Highly consistent duty attendance with minor remarks.';
+    grade = 'A+';
+    remarks = 'Excellent. Exceptional punctuality, diligence, and highly reliable.';
+  } else if (score >= 90) {
+    grade = 'A';
+    remarks = 'Superb performance. Highly consistent and dedicated candidate.';
+  } else if (score >= 80) {
+    grade = 'B';
+    remarks = 'Good performance. Highly consistent attendance with minor areas to monitor.';
   } else if (score >= 70) {
-    remarks = 'Average performance. Needs to reduce late arrivals and monitor active hours.';
+    grade = 'C';
+    remarks = 'Average. Needs to reduce late arrivals and monitor active hours output.';
   } else if (score >= 55) {
-    remarks = 'Below average. Needs strict supervision. High frequency of missing checkouts and short hours.';
+    grade = 'D';
+    remarks = 'Needs Improvement. Below average performance. Immediate supervisor counseling required.';
   } else {
-    remarks = 'Unsatisfactory. Immediate performance coaching required. Contact supervisor.';
+    grade = 'F';
+    remarks = 'Unsatisfactory. Immediate performance coaching and warning recommended.';
   }
 
-  return { score, remarks };
+  // Construct change description details
+  const details: string[] = [];
+  if (absentCount > 0) details.push(`${absentCount} absent day${absentCount > 1 ? 's' : ''}`);
+  if (lateCount > 0) details.push(`${lateCount} late day${lateCount > 1 ? 's' : ''}`);
+  if (shortCount > 0) details.push(`${shortCount} short hour day${shortCount > 1 ? 's' : ''}`);
+  if (missingCheckoutCount > 0) details.push(`${missingCheckoutCount} missing checkout${missingCheckoutCount > 1 ? 's' : ''}`);
+  if (sundayWorkedCount > 0) details.push(`${sundayWorkedCount} Sunday${sundayWorkedCount > 1 ? 's' : ''} worked`);
+
+  let description = details.length > 0 ? details.join(', ') : 'Pristine perfect month attendance record!';
+
+  return {
+    score,
+    remarks,
+    breakdown: {
+      baseScore: 100,
+      lateCount,
+      latePenalty,
+      shortCount,
+      shortHoursPenalty,
+      absentCount,
+      absentPenalty,
+      missingCheckoutCount,
+      missingCheckoutPenalty,
+      sundayWorkedCount,
+      sundayWorkedBonus,
+      perfectBonus,
+      excellentBonus,
+      finalScore: score,
+      grade,
+      description,
+      // Compatibility keys
+      absent_days: absentCount,
+      late_days: lateCount,
+      short_days: shortCount,
+      missing_checkout: missingCheckoutCount,
+      sunday_bonus: sundayWorkedBonus,
+      perfect_attendance: perfectBonus > 0,
+      excellent_attendance: excellentBonus > 0
+    }
+  };
+}
+
+/**
+ * Phase 7 - Manager Action Recommendations
+ */
+export function getManagerActionRecommendation(score: number): {
+  recommendation: string;
+  color: string;
+  badgeColor: string;
+  description: string;
+} {
+  if (score >= 95) {
+    return {
+      recommendation: 'Appreciation Letter',
+      color: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+      badgeColor: 'bg-emerald-500 text-white',
+      description: 'Excellent score of 95+. Automatically recommended for an official Appreciation Letter.'
+    };
+  } else if (score >= 90) {
+    return {
+      recommendation: 'Performance Bonus Candidate',
+      color: 'bg-teal-50 text-teal-800 border-teal-200',
+      badgeColor: 'bg-teal-500 text-white',
+      description: 'Superb score of 90+. Recommended as a corporate Performance Bonus Candidate.'
+    };
+  } else if (score >= 70) {
+    return {
+      recommendation: 'Normal Monitoring',
+      color: 'bg-slate-50 text-slate-700 border-slate-200',
+      badgeColor: 'bg-slate-400 text-white',
+      description: 'Standard safe bracket of 70-89. Placed under standard Normal Monitoring roster.'
+    };
+  } else if (score >= 55) {
+    return {
+      recommendation: 'Performance Discussion Required',
+      color: 'bg-amber-50 text-amber-800 border-amber-200',
+      badgeColor: 'bg-amber-500 text-slate-900',
+      description: 'Score in warning bracket of 55-69. Formal physical Performance Discussion Required.'
+    };
+  } else {
+    return {
+      recommendation: 'Warning Recommended',
+      color: 'bg-rose-50 text-rose-800 border-rose-200',
+      badgeColor: 'bg-rose-600 text-white',
+      description: 'Severe performance shortfall below 55. Formal disciplinary Warning Recommended.'
+    };
+  }
 }
 
 /**
@@ -369,7 +596,7 @@ export function getMonToSatDatesForDate(dateStr: string): string[] {
 export function getSundayPaidOffStatus(
   sundayDateStr: string,
   allAttendanceRecords: { date: string; status: string; check_in?: string | null; check_out?: string | null; net_hours?: number; overtime_hours?: number }[]
-): { eligible: boolean; status: string; overtimeHours: number } {
+): { eligible: boolean; status: string; overtimeHours: number; workedHours: number } {
   const monToSatDates = getMonToSatDatesForDate(sundayDateStr);
   
   const weekRecords = allAttendanceRecords.filter(r => monToSatDates.includes(r.date || ''));
@@ -405,15 +632,12 @@ export function getSundayPaidOffStatus(
   const netHours = sundayRec && sundayRec.net_hours ? sundayRec.net_hours : 0;
   
   let finalStatus = '';
-  let overtimeHours = 0;
+  let workedHours = 0;
+  let overtimeHours = 0; // Sundays never count as overtime
   
   if (worked) {
-    overtimeHours = netHours; // all Sunday hours worked count as overtime
-    if (isEligible) {
-      finalStatus = 'Sunday Overtime';
-    } else {
-      finalStatus = 'Sunday Worked';
-    }
+    workedHours = netHours;
+    finalStatus = 'Sunday Worked';
   } else {
     if (isEligible) {
       finalStatus = 'Paid Weekly Off';
@@ -425,7 +649,8 @@ export function getSundayPaidOffStatus(
   return {
     eligible: isEligible,
     status: finalStatus,
-    overtimeHours
+    overtimeHours,
+    workedHours
   };
 }
 
@@ -498,6 +723,74 @@ export function getSundaysInMonth(year: number, month: number): string[] {
     }
   }
   return sundays;
+}
+
+interface RecommendationInput {
+  score: number;
+  attendancePercentage: number;
+  absentsCount: number;
+  lateCount?: number;
+}
+
+export function getSmartBonusRecommendation(input: RecommendationInput): {
+  recommendation: 'Hazri Bonus Eligible' | 'Performance Bonus Eligible' | 'Performance Review Required' | 'Warning Recommended' | 'Standard Performance' | 'Punctuality Bonus Eligible' | string;
+  color: string;
+  badgeColor: string;
+  description: string;
+  recommendedBonuses: string[];
+} {
+  const { score, attendancePercentage, absentsCount, lateCount } = input;
+  const recommendedBonuses: string[] = [];
+
+  if (score >= 95 && attendancePercentage >= 95) {
+    recommendedBonuses.push('Hazri Bonus');
+  }
+  if (score >= 90 && absentsCount === 0) {
+    recommendedBonuses.push('Performance Bonus');
+  }
+  if (lateCount !== undefined && lateCount === 0) {
+    recommendedBonuses.push('Punctuality Bonus');
+  }
+
+  let recType = 'Standard Performance';
+  let color = 'bg-slate-50 text-slate-700 border-slate-200';
+  let badgeColor = 'bg-slate-400 text-white';
+  let description = 'Roster score meets standard operational benchmarks safely.';
+
+  if (score >= 95 && attendancePercentage >= 95) {
+    recType = 'Hazri Bonus Eligible';
+    color = 'bg-emerald-50 text-emerald-800 border-emerald-200';
+    badgeColor = 'bg-emerald-500 text-white';
+    description = 'Outstanding attendance (>=95%) & score (>=95). Qualified for company attendance hazri bonus incentives.';
+  } else if (score >= 90 && absentsCount === 0) {
+    recType = 'Performance Bonus Eligible';
+    color = 'bg-teal-50 text-teal-800 border-teal-200';
+    badgeColor = 'bg-teal-500 text-white';
+    description = 'Zero absents logged & outstanding compliance score (>=90). Recommended for high performance bonuses.';
+  } else if (lateCount !== undefined && lateCount === 0) {
+    recType = 'Punctuality Bonus Eligible';
+    color = 'bg-indigo-50 text-indigo-800 border-indigo-200';
+    badgeColor = 'bg-indigo-500 text-white';
+    description = 'Zero tardiness recorded throughout the billing month. Recommended for punctuality bonus.';
+  } else if (score < 55) {
+    recType = 'Warning Recommended';
+    color = 'bg-rose-50 text-rose-800 border-rose-200';
+    badgeColor = 'bg-rose-600 text-white';
+    description = 'Severe performance rating shortfall (<55). Admin warning letter issue and counseling review proposed.';
+  } else if (score < 70) {
+    recType = 'Performance Review Required';
+    color = 'bg-amber-50 text-amber-800 border-amber-200';
+    badgeColor = 'bg-amber-500 text-slate-900';
+    description = 'Compliance score below safety threshold (<70). Formal performance review & corrective feedback cycle required.';
+  }
+
+  return {
+    recommendation: recType,
+    color,
+    badgeColor,
+    description: description + (recommendedBonuses.length > 0 ? ` Recommended: ${recommendedBonuses.join(', ')}.` : ''),
+    recommendedBonuses
+  };
 }
 
 

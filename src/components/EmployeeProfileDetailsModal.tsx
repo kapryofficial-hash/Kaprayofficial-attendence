@@ -16,11 +16,17 @@ import {
   Calendar, 
   FileCheck,
   AlertTriangle,
-  Info
+  Info,
+  CheckCircle,
+  Activity,
+  TrendingUp,
+  Clock,
+  AlertCircle,
+  Award
 } from 'lucide-react';
 import { DbEmployee, DbDepartment, DbAttendance } from '../supabaseClient';
 import { EmployeeCommission, EmployeeAllowance, OwnerAdjustment, SalaryReview, EmployeeDocument, EmployeeAdvance, AdvanceRecovery, EmployeeWarning, AllowedUserRole } from '../types';
-import { formatPKR } from '../utils';
+import { formatPKR, calculatePerformanceScore, getSmartBonusRecommendation } from '../utils';
 
 interface EmployeeProfileDetailsModalProps {
   isOpen: boolean;
@@ -89,7 +95,7 @@ export function EmployeeProfileDetailsModal({
   adjustments,
   salaryReviews
 }: EmployeeProfileDetailsModalProps) {
-  const [activeTab, setActiveTab] = useState<'info' | 'vault' | 'advance' | 'disciplinary' | 'report'>('info');
+  const [activeTab, setActiveTab] = useState<'summary' | 'attendance' | 'performance' | 'vault' | 'advance' | 'disciplinary' | 'timeline'>('summary');
   const [isSaving, setIsSaving] = useState(false);
 
   // States for Employment editing
@@ -158,6 +164,146 @@ export function EmployeeProfileDetailsModal({
   const outstandingAdvanceBalance = useMemo(() => {
     return Math.max(0, totalIssuedAdvances - totalRecoveredAdvances);
   }, [totalIssuedAdvances, totalRecoveredAdvances]);
+
+  const chronologicalTimeline = useMemo(() => {
+    const list: Array<{
+      date: string;
+      type: 'attendance' | 'document' | 'advance' | 'warning';
+      title: string;
+      desc: string;
+      color: string;
+    }> = [];
+
+    // 1. Attendance events
+    attendance
+      .filter(a => a.employee_id === employee.id && !a.is_deleted)
+      .forEach(a => {
+        let desc = `Shift status registered. Check-in: ${a.check_in || '--:--'} | Check-out: ${a.check_out || '--:--'}.`;
+        if (a.late_minutes > 0) desc += ` Arrived late by ${a.late_minutes} minutes.`;
+        if (a.short_hours > 0) desc += ` Shift logged short of the expected hours.`;
+        
+        list.push({
+          date: a.date,
+          type: 'attendance',
+          title: `Attendance: ${a.status}`,
+          desc,
+          color: a.status === 'Present' ? 'bg-emerald-500' : a.status === 'Absent' ? 'bg-rose-500' : 'bg-slate-400'
+        });
+      });
+
+    // 2. Documents
+    documents
+      .filter(d => d.employee_id === employee.id)
+      .forEach(d => {
+        list.push({
+          date: d.uploaded_at?.split('T')[0] || '',
+          type: 'document',
+          title: 'Vault File Deposited',
+          desc: `Secure file "${d.file_name}" was uploaded successfully to worker vault.`,
+          color: 'bg-indigo-500'
+        });
+      });
+
+    // 3. Advances & Recoveries
+    advances
+      .filter(a => a.employee_id === employee.id)
+      .forEach(a => {
+        list.push({
+          date: a.date,
+          type: 'advance',
+          title: `Loan Cash Advance Disbursed`,
+          desc: `Loan amount of PKR ${a.amount} issued. Reason: ${a.reason || 'Not specified'}. Approved by: ${a.approved_by || 'Admin'}.`,
+          color: 'bg-amber-500'
+        });
+      });
+
+    recoveries
+      .filter(r => r.employee_id === employee.id)
+      .forEach(r => {
+        list.push({
+          date: r.date,
+          type: 'advance',
+          title: `Loan Cash Recovery Entry`,
+          desc: `Amount of PKR ${r.recovered_amount} recovered via ${r.recovery_type} for month ${r.recovery_month || 'N/A'}. Deducted by: ${r.recovered_by || 'Admin'}.`,
+          color: 'bg-teal-500'
+        });
+      });
+
+    // 4. Warnings
+    warnings
+      .filter(w => w.employee_id === employee.id)
+      .forEach(w => {
+        list.push({
+          date: w.date,
+          type: 'warning',
+          title: `Disciplinary Action Letter: ${w.warning_type}`,
+          desc: `Issued corrective action warning: ${w.reason}. Operating status: ${w.status}. Approved: ${w.issued_by}.`,
+          color: 'bg-rose-600'
+        });
+      });
+
+    return list.sort((a,b) => b.date.localeCompare(a.date));
+  }, [employee.id, attendance, documents, advances, recoveries, warnings]);
+
+  const monthlyStats = useMemo(() => {
+    const now = new Date();
+    const curYear = String(now.getFullYear());
+    const curMonth = String(now.getMonth() + 1).padStart(2, '0');
+    
+    const records = attendance.filter(a => {
+      if (a.employee_id !== employee.id || a.is_deleted) return false;
+      const [y, m] = a.date.split('-');
+      return y === curYear && m === curMonth;
+    });
+
+    const presents = records.filter(a => a.status === 'Present').length;
+    const halfDays = records.filter(a => a.status === 'Half-Day').length;
+    const leaves = records.filter(a => a.status === 'Leave').length;
+    const offs = records.filter(a => a.status === 'Off').length;
+    const absents = records.filter(a => a.status === 'Absent').length;
+    const lates = records.filter(a => a.late_minutes > 0 && a.status !== 'Absent').length;
+    const missingCheckouts = records.filter(a => !a.check_out && a.check_in).length;
+
+    const scoreData = calculatePerformanceScore(
+      records.map(r => ({
+        status: r.status,
+        late_minutes: r.late_minutes,
+        net_hours: r.net_hours,
+        overtime_hours: r.overtime_hours,
+        short_hours: r.short_hours,
+        manual_status: r.manual_status,
+        date: r.date
+      }))
+    );
+
+    const totalDays = presents + halfDays + leaves + offs + absents;
+    const attendancePercentage = totalDays > 0
+      ? (((presents + leaves + offs + (halfDays * 0.5)) / totalDays) * 100)
+      : 100;
+
+    const rec = getSmartBonusRecommendation({
+      score: scoreData.score,
+      attendancePercentage,
+      absentsCount: absents,
+      lateCount: lates
+    });
+
+    return {
+      records,
+      presents,
+      halfDays,
+      leaves,
+      offs,
+      absents,
+      lates,
+      missingCheckouts,
+      score: scoreData.score,
+      remarks: scoreData.remarks,
+      breakdown: scoreData.breakdown,
+      attendancePercentage,
+      recommendation: rec
+    };
+  }, [employee.id, attendance]);
 
   // Form Submission handlers
   const handleSaveInfo = async (e: React.FormEvent) => {
@@ -544,17 +690,17 @@ export function EmployeeProfileDetailsModal({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl h-[85vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 border border-slate-200">
+    <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs flex justify-end z-50 animate-in fade-in duration-200">
+      <div className="bg-white w-full max-w-xl md:max-w-2xl h-screen flex flex-col shadow-2xl overflow-hidden animate-in slide-in-from-right duration-300 border-l border-slate-200">
         
-        {/* Banner header inside Profile modal */}
-        <div className="bg-slate-900 px-6 py-5 text-white flex items-center justify-between shrink-0">
+        {/* Drawer Banner Header */}
+        <div className="bg-slate-900 px-5 py-4 text-white flex items-center justify-between shrink-0">
           <div className="flex items-center gap-3">
             <div className="h-10 w-10 rounded-full bg-emerald-600 flex items-center justify-center font-bold font-mono text-base shadow-inner">
               {employee.name.charAt(0).toUpperCase()}
             </div>
             <div>
-              <h3 className="font-extrabold text-base leading-tight tracking-tight flex items-center gap-2">
+              <h3 className="font-extrabold text-sm leading-tight tracking-tight flex items-center gap-2">
                 {employee.name}
                 <span className="text-xs text-slate-400 font-mono font-medium">({employee.id})</span>
               </h3>
@@ -572,34 +718,60 @@ export function EmployeeProfileDetailsModal({
           </button>
         </div>
 
-        {/* 5-Tab Navigation controller layout */}
-        <div className="flex border-b border-slate-200 bg-slate-50 px-6 py-2.5 gap-2 shrink-0 overflow-x-auto w-full">
+        {/* Dynamic 7-Tab Navigation row */}
+        <div className="flex border-b border-slate-200 bg-slate-50 px-4 py-2 gap-1.5 shrink-0 overflow-x-auto w-full font-sans">
           <button
             type="button"
-            onClick={() => setActiveTab('info')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
-              activeTab === 'info' 
+            onClick={() => setActiveTab('summary')}
+            className={`px-3 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
+              activeTab === 'summary' 
                 ? 'bg-white text-emerald-800 shadow-xs border-b-2 border-emerald-600' 
                 : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
             }`}
           >
-            <User className="h-4 w-4" />
-            Employment specs
+            <User className="h-3.5 w-3.5" />
+            Summary
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('attendance')}
+            className={`px-3 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
+              activeTab === 'attendance' 
+                ? 'bg-white text-emerald-800 shadow-xs border-b-2 border-emerald-600' 
+                : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+            }`}
+          >
+            <CheckCircle className="h-3.5 w-3.5" />
+            Attendance
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('performance')}
+            className={`px-3 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
+              activeTab === 'performance' 
+                ? 'bg-white text-emerald-800 shadow-xs border-b-2 border-emerald-600' 
+                : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+            }`}
+          >
+            <Activity className="h-3.5 w-3.5" />
+            Performance
           </button>
 
           <button
             type="button"
             onClick={() => setActiveTab('vault')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
+            className={`px-3 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
               activeTab === 'vault' 
                 ? 'bg-white text-emerald-800 shadow-xs border-b-2 border-emerald-600' 
                 : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
             }`}
           >
-            <FolderLock className="h-4 w-4" />
-            Document Vault
+            <FolderLock className="h-3.5 w-3.5" />
+            Documents
             {currentEmployeeDocs.length > 0 && (
-              <span className="bg-emerald-100 text-emerald-800 text-[9px] px-1.5 py-0.5 rounded-full font-black">
+              <span className="bg-emerald-100 text-emerald-850 text-[9px] px-1 rounded-full font-black">
                 {currentEmployeeDocs.length}
               </span>
             )}
@@ -608,16 +780,16 @@ export function EmployeeProfileDetailsModal({
           <button
             type="button"
             onClick={() => setActiveTab('advance')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
+            className={`px-3 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
               activeTab === 'advance' 
                 ? 'bg-white text-emerald-800 shadow-xs border-b-2 border-emerald-600' 
                 : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
             }`}
           >
-            <Coins className="h-4 w-4" />
-            Advance Ledger
+            <Coins className="h-3.5 w-3.5" />
+            Advances
             {outstandingAdvanceBalance > 0 && (
-              <span className="bg-amber-100 text-amber-800 text-[9px] px-1.5 py-0.5 rounded-full font-black animate-pulse">
+              <span className="bg-amber-100 text-amber-850 text-[9px] px-1 rounded font-black animate-pulse">
                 {formatPKR(outstandingAdvanceBalance)}
               </span>
             )}
@@ -626,14 +798,14 @@ export function EmployeeProfileDetailsModal({
           <button
             type="button"
             onClick={() => setActiveTab('disciplinary')}
-            className={`px-4 py-2 rounded-lg text-[11px] font-bold transition-all flex items-center gap-2 cursor-pointer ${
+            className={`px-3 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
               activeTab === 'disciplinary' 
                 ? 'bg-white text-emerald-800 shadow-xs border-b-2 border-emerald-600' 
                 : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
             }`}
           >
-            <ShieldAlert className="h-4 w-4" />
-            Warnings Log
+            <ShieldAlert className="h-3.5 w-3.5" />
+            Warnings
             {currentEmployeeWarnings.filter(w => w.status === 'Active').length > 0 && (
               <span className="bg-rose-100 text-rose-800 text-[9px] px-1.5 py-0.5 rounded-full font-black">
                 {currentEmployeeWarnings.filter(w => w.status === 'Active').length}
@@ -643,28 +815,50 @@ export function EmployeeProfileDetailsModal({
 
           <button
             type="button"
-            onClick={() => setActiveTab('report')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
-              activeTab === 'report' 
+            onClick={() => setActiveTab('timeline')}
+            className={`px-3 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
+              activeTab === 'timeline' 
                 ? 'bg-white text-emerald-800 shadow-xs border-b-2 border-emerald-600' 
                 : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
             }`}
           >
-            <Printer className="h-4 w-4" />
-            Print Self-Report
+            <TrendingUp className="h-3.5 w-3.5" />
+            Timeline
           </button>
         </div>
 
         {/* Content body layout container */}
         <div className="flex-1 overflow-y-auto p-6 bg-slate-50">
           
-          {/* TAB 1: PROFILE INFORMATION DETAILS Form */}
-          {activeTab === 'info' && (
-            <div className="max-w-xl mx-auto bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-              <h4 className="text-sm font-bold text-slate-800 mb-4 pb-2 border-b border-slate-100 uppercase tracking-wider flex items-center gap-2">
-                <FileCheck className="h-4 w-4 text-emerald-655" />
-                Customize Worker Employment Profile Specs
-              </h4>
+          {/* TAB 1: SUMMARY DETAILS WITH STATS & SPECS FORM */}
+          {activeTab === 'summary' && (
+            <div className="max-w-xl mx-auto">
+              
+              {/* Roster Summary Overview Stats */}
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6 font-sans">
+                <div className="bg-white border border-slate-200 shadow-xs rounded-xl p-3 text-left">
+                  <span className="text-[9px] uppercase font-extrabold text-slate-400 block tracking-wider">Base Salary</span>
+                  <span className="text-xs font-black text-slate-700 font-mono mt-0.5 block">{formatPKR(employee.base_salary)}</span>
+                </div>
+                <div className="bg-white border border-slate-200 shadow-xs rounded-xl p-3 text-left">
+                  <span className="text-[9px] uppercase font-extrabold text-slate-400 block tracking-wider">Attendance %</span>
+                  <span className="text-xs font-black text-emerald-700 font-mono mt-0.5 block">{monthlyStats.attendancePercentage.toFixed(1)}%</span>
+                </div>
+                <div className="bg-white border border-slate-200 shadow-xs rounded-xl p-3 text-left">
+                  <span className="text-[9px] uppercase font-extrabold text-slate-400 block tracking-wider">Balance Loan</span>
+                  <span className="text-xs font-black text-amber-700 font-mono mt-0.5 block">{formatPKR(outstandingAdvanceBalance)}</span>
+                </div>
+                <div className="bg-white border border-slate-200 shadow-xs rounded-xl p-3 text-left">
+                  <span className="text-[9px] uppercase font-extrabold text-slate-400 block tracking-wider">Warnings Log</span>
+                  <span className="text-xs font-black text-rose-600 font-mono mt-0.5 block">{currentEmployeeWarnings.length} letters</span>
+                </div>
+              </div>
+
+              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                <h4 className="text-xs font-bold text-slate-800 mb-4 pb-2 border-b border-slate-100 uppercase tracking-wider flex items-center gap-2">
+                  <FileCheck className="h-4 w-4 text-emerald-600" />
+                  Customize Worker Employment Profile Specs
+                </h4>
               
               <form onSubmit={handleSaveInfo} className="space-y-4">
                 <div>
@@ -746,6 +940,695 @@ export function EmployeeProfileDetailsModal({
                   </div>
                 )}
               </form>
+            </div>
+          </div>
+          )}
+
+          {/* TAB: ATTENDANCE MONTHLY HISTORY LOGS */}
+          {activeTab === 'attendance' && (
+            <div className="space-y-4 font-sans">
+              <div className="flex items-center justify-between bg-white border border-slate-200 rounded-xl p-4 shadow-xs">
+                <div>
+                  <h4 className="font-extrabold text-slate-800 text-xs uppercase tracking-wide">
+                    Monthly Shift Attendance Logs
+                  </h4>
+                  <p className="text-[10px] text-slate-400 mt-0.5">List of daily attendance and timesheet entries recorded this month</p>
+                </div>
+                <div className="flex gap-2 text-xs font-mono font-bold font-semibold">
+                  <span className="bg-emerald-50 text-emerald-800 border border-emerald-100 px-2.5 py-1 rounded">
+                    Presents: {monthlyStats.presents}
+                  </span>
+                  <span className="bg-rose-50 text-rose-800 border border-rose-100 px-2.5 py-1 rounded">
+                    Absents: {monthlyStats.absents}
+                  </span>
+                </div>
+              </div>
+
+              {monthlyStats.records.length === 0 ? (
+                <div className="bg-white rounded-xl border border-slate-200 p-8 text-center text-xs text-slate-400 font-sans italic">
+                  No shift records logged for this employee within the active scope.
+                </div>
+              ) : (
+                <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-xs">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs border-collapse font-sans">
+                      <thead>
+                        <tr className="bg-slate-50 text-slate-500 font-bold border-b border-slate-200 text-[10px] uppercase tracking-wider">
+                          <th className="p-3 font-semibold">Date</th>
+                          <th className="p-3 text-center font-semibold">Shift Status</th>
+                          <th className="p-3 font-semibold">Check-In</th>
+                          <th className="p-3 font-semibold">Check-Out</th>
+                          <th className="p-3 font-semibold">Anomalies / Events</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 font-mono text-[11px] text-slate-700">
+                        {monthlyStats.records.sort((a, b) => b.date.localeCompare(a.date)).map(a => (
+                          <tr key={a.id} className="hover:bg-slate-50/50">
+                            <td className="p-3 font-bold text-slate-700">{a.date}</td>
+                            <td className="p-3 text-center">
+                              <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${
+                                a.status === 'Present' ? 'bg-emerald-100 text-emerald-800' :
+                                a.status === 'Absent' ? 'bg-rose-100 text-rose-800' :
+                                a.status === 'Half-Day' ? 'bg-sky-100 text-sky-800' :
+                                'bg-slate-150 text-slate-700 bg-slate-100'
+                              }`}>
+                                {a.status}
+                              </span>
+                            </td>
+                            <td className="p-3 font-semibold text-slate-600">{a.check_in || '--:--'}</td>
+                            <td className="p-3 font-semibold text-slate-600">{a.check_out || '--:--'}</td>
+                            <td className="p-3 text-slate-500 font-sans text-[10px] leading-relaxed">
+                              {a.late_minutes > 0 && <span className="text-amber-700 font-bold block">⏱️ Late Arrival: {a.late_minutes} min</span>}
+                              {a.short_hours > 0 && <span className="text-rose-600 font-bold block">📉 Short shift logged</span>}
+                              {!a.late_minutes && !a.short_hours && a.status === 'Present' && <span className="text-emerald-600 font-medium block">✓ Standard on-time Shift</span>}
+                              {a.status === 'Absent' && <span className="text-red-700 font-bold block">✗ No-show registry</span>}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* TAB: PERFORMANCE SCORE DETAILS */}
+          {activeTab === 'performance' && (() => {
+            const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+            const formattedLates = (monthlyStats.records || [])
+              .filter(l => l.late_minutes > 0 && l.status !== 'Absent' && l.status !== 'Leave' && l.status !== 'Off')
+              .map(l => {
+                const dObj = new Date(l.date);
+                const dayName = days[dObj.getDay()];
+                const isFri = dObj.getDay() === 5;
+                const limitStr = isFri ? '3:00 PM' : '1:30 PM';
+                return {
+                  date: l.date,
+                  dayName,
+                  checkIn: l.check_in || '-',
+                  checkout: l.check_out || '-',
+                  limit: `Late after ${limitStr}`,
+                  lateMins: l.late_minutes,
+                  netHours: l.net_hours,
+                  status: l.status || 'Present',
+                  remarks: l.remarks || ''
+                };
+              })
+              .sort((a, b) => b.date.localeCompare(a.date));
+
+            const formattedAbsents = (monthlyStats.records || [])
+              .filter(l => l.status === 'Absent')
+              .map(l => {
+                const dObj = new Date(l.date);
+                const dayName = days[dObj.getDay()];
+                return {
+                  date: l.date,
+                  dayName,
+                  status: l.status || 'Absent',
+                  remarks: l.remarks || '',
+                  penaltyImpact: -10,
+                  approvalStatus: l.manual_status !== 'Auto' && l.manual_status !== 'Absent' ? l.manual_status : 'Unapproved'
+                };
+              })
+              .sort((a, b) => b.date.localeCompare(a.date));
+
+            const formattedMissingCheckouts = (monthlyStats.records || [])
+              .filter(l => l.status === 'Missing Checkout' || (!l.check_out && l.check_in))
+              .map(l => {
+                const dObj = new Date(l.date);
+                const dayName = days[dObj.getDay()];
+                return {
+                  date: l.date,
+                  dayName,
+                  checkIn: l.check_in || '-',
+                  checkout: 'Missing',
+                  status: l.status || 'Missing Checkout',
+                  remarks: l.remarks || '',
+                  adminReviewStatus: l.manual_status !== 'Auto' && l.manual_status !== 'Missing Checkout' ? l.manual_status : 'Pending Review'
+                };
+              })
+              .sort((a, b) => b.date.localeCompare(a.date));
+
+            const formattedShortHours = (monthlyStats.records || [])
+              .filter(l => {
+                const sHrs = l.short_hours !== undefined ? l.short_hours : 0;
+                return sHrs > 0 && l.status !== 'Absent' && l.status !== 'Leave' && l.status !== 'Off';
+              })
+              .map(l => {
+                const dObj = new Date(l.date);
+                const dayName = days[dObj.getDay()];
+                const isFri = dObj.getDay() === 5;
+                const requiredHours = isFri ? 7.0 : 10.0;
+                return {
+                  date: l.date,
+                  dayName,
+                  checkIn: l.check_in || '-',
+                  checkout: l.check_out || '-',
+                  workedHours: l.net_hours,
+                  requiredHours,
+                  shortHours: l.short_hours || 0,
+                  approvalStatus: l.manual_status !== 'Auto' ? l.manual_status : 'Pending Review',
+                  remarks: l.remarks || ''
+                };
+              })
+              .sort((a, b) => b.date.localeCompare(a.date));
+
+            const b = monthlyStats.breakdown || {
+              baseScore: 100,
+              lateCount: 0,
+              latePenalty: 0,
+              shortCount: 0,
+              shortHoursPenalty: 0,
+              absentCount: 0,
+              absentPenalty: 0,
+              missingCheckoutCount: 0,
+              missingCheckoutPenalty: 0,
+              sundayWorkedCount: 0,
+              sundayWorkedBonus: 0,
+              perfectBonus: 0,
+              excellentBonus: 0,
+              finalScore: monthlyStats.score || 100,
+              grade: 'Average',
+              description: ''
+            };
+
+            const netImpact = (b.absentPenalty || 0) + 
+                              (b.latePenalty || 0) + 
+                              (b.missingCheckoutPenalty || 0) + 
+                              (b.shortHoursPenalty || 0) + 
+                              (b.sundayWorkedBonus || 0) + 
+                              (b.perfectBonus || 0) + 
+                              (b.excellentBonus || 0);
+
+            const isLateMismatch = (b.lateCount || 0) !== formattedLates.length;
+            const isAbsentMismatch = (b.absentCount || 0) !== formattedAbsents.length;
+            const isMissingCheckoutMismatch = (b.missingCheckoutCount || 0) !== formattedMissingCheckouts.length;
+            const isShortHoursMismatch = (b.shortCount || 0) !== formattedShortHours.length;
+            const hasValidationMismatch = isLateMismatch || isAbsentMismatch || isMissingCheckoutMismatch || isShortHoursMismatch;
+
+            return (
+              <div className="space-y-6 font-sans">
+                <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 shadow-xs">
+                  <div>
+                    <h4 className="font-extrabold text-slate-800 text-xs uppercase tracking-wide">
+                      Performance Review Profile (Month Scope)
+                    </h4>
+                    <p className="text-[10px] text-slate-400 mt-0.5">Automated rating index & policy eligibility metrics</p>
+                  </div>
+                  <div className="bg-slate-900 text-white font-mono px-4 py-2 rounded-xl flex items-baseline gap-1">
+                    <span className="text-2xl font-black">{monthlyStats.score}</span>
+                    <span className="text-[10px] text-slate-400">/ 100</span>
+                  </div>
+                </div>
+
+                {hasValidationMismatch && (
+                  <div id="integrity-warning-modal" className="bg-amber-50 border-l-4 border-amber-500 p-4 rounded-r-xl shadow-[0_1px_3px_rgba(0,0,0,0.05)] text-amber-850 font-sans text-xs">
+                    <div className="flex gap-2 items-center">
+                      <AlertCircle className="h-5 w-5 text-amber-650 shrink-0" />
+                      <div>
+                        <h6 className="font-extrabold uppercase tracking-wide text-amber-950">Performance Report Integrity Warning</h6>
+                        <p className="text-amber-800 mt-0.5 font-semibold">
+                          Summary counts do not match detailed records.
+                        </p>
+                        <div className="text-[10px] text-amber-700 font-mono mt-1 grid grid-cols-2 md:grid-cols-4 gap-2 border-t border-amber-200/50 pt-1.5">
+                          <span>Late Days: Summary {b.lateCount} vs Section {formattedLates.length}</span>
+                          <span>Absent Days: Summary {b.absentCount} vs Section {formattedAbsents.length}</span>
+                          <span>Missing Checkouts: Summary {b.missingCheckoutCount} vs Section {formattedMissingCheckouts.length}</span>
+                          <span>Short Hours: Summary {b.shortCount} vs Section {formattedShortHours.length}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Performance Impact Summary Section */}
+                <div id="performance-impact-summary-modal" className="bg-slate-50 border border-slate-200 rounded-xl p-5 space-y-4 font-sans">
+                  <div className="flex justify-between items-center border-b pb-2 border-slate-200">
+                    <h5 className="font-extrabold text-slate-800 text-xs uppercase tracking-wider flex items-center gap-1.5">
+                      <Award className="h-4.5 w-4.5 text-indigo-600" />
+                      Performance Impact Summary
+                    </h5>
+                    <span className="text-[9px] font-bold text-indigo-750 bg-indigo-50 border border-indigo-150 rounded px-2 py-0.5 uppercase">Audit Verification</span>
+                  </div>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-slate-600">
+                    <div className="space-y-3">
+                      {/* Absent Penalty */}
+                      <div className="flex justify-between items-center border-b border-slate-100 pb-1.5">
+                        <div>
+                          <span className="font-bold text-slate-700 block">Absent Penalty</span>
+                          <span className="text-[10px] text-slate-400">Absent Days: {b.absentCount}</span>
+                        </div>
+                        <span className={`font-mono font-extrabold ${b.absentPenalty < 0 ? 'text-rose-600' : 'text-slate-400'}`}>
+                          {b.absentPenalty < 0 ? `${b.absentPenalty}` : '0'}
+                        </span>
+                      </div>
+
+                      {/* Late Penalty */}
+                      <div className="flex justify-between items-center border-b border-slate-100 pb-1.5">
+                        <div>
+                          <span className="font-bold text-slate-700 block">Late Penalty</span>
+                          <span className="text-[10px] text-slate-400">Late Days: {b.lateCount}</span>
+                        </div>
+                        <span className={`font-mono font-extrabold ${b.latePenalty < 0 ? 'text-rose-600' : 'text-slate-400'}`}>
+                          {b.latePenalty < 0 ? `${b.latePenalty}` : '0'}
+                        </span>
+                      </div>
+
+                      {/* Missing Checkout Penalty */}
+                      <div className="flex justify-between items-center border-b border-slate-100 pb-1.5">
+                        <div>
+                          <span className="font-bold text-slate-700 block">Missing Checkout Penalty</span>
+                          <span className="text-[10px] text-slate-400">Missing Checkout: {b.missingCheckoutCount}</span>
+                        </div>
+                        <span className={`font-mono font-extrabold ${b.missingCheckoutPenalty < 0 ? 'text-rose-600' : 'text-slate-400'}`}>
+                          {b.missingCheckoutPenalty < 0 ? `${b.missingCheckoutPenalty}` : '0'}
+                        </span>
+                      </div>
+
+                      {/* Short Hours Penalty */}
+                      <div className="flex justify-between items-center border-b border-slate-100 pb-1.5">
+                        <div>
+                          <span className="font-bold text-slate-700 block">Short Hours Penalty</span>
+                          <span className="text-[10px] text-slate-400">Short Hours Days: {b.shortCount}</span>
+                        </div>
+                        <span className={`font-mono font-extrabold ${b.shortHoursPenalty < 0 ? 'text-rose-600' : 'text-slate-400'}`}>
+                          {b.shortHoursPenalty < 0 ? `${b.shortHoursPenalty}` : '0'}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="space-y-3">
+                      {/* Sunday Worked Bonus */}
+                      <div className="flex justify-between items-center border-b border-slate-100 pb-1.5">
+                        <div>
+                          <span className="font-bold text-emerald-700 block">Sunday Worked Bonus</span>
+                          <span className="text-[10px] text-slate-400">Sunday Worked: {b.sundayWorkedCount}</span>
+                        </div>
+                        <span className={`font-mono font-extrabold ${b.sundayWorkedBonus > 0 ? 'text-emerald-600' : 'text-slate-400'}`}>
+                          {b.sundayWorkedBonus > 0 ? `+${b.sundayWorkedBonus}` : '0'}
+                        </span>
+                      </div>
+
+                      {/* Perfect Attendance Bonus */}
+                      <div className="flex justify-between items-center border-b border-slate-100 pb-1.5">
+                        <div>
+                          <span className="font-bold text-emerald-700 block">Perfect Attendance Bonus</span>
+                          <span className="text-[10px] text-slate-400">Full Month Pristine</span>
+                        </div>
+                        <span className={`font-mono font-extrabold ${b.perfectBonus > 0 ? 'text-emerald-600' : 'text-slate-400'}`}>
+                          {b.perfectBonus > 0 ? `+${b.perfectBonus}` : '0'}
+                        </span>
+                      </div>
+
+                      {/* Excellent Attendance Bonus */}
+                      <div className="flex justify-between items-center border-b border-slate-100 pb-1.5">
+                        <div>
+                          <span className="font-bold text-emerald-600 block">Excellent Attendance Bonus</span>
+                          <span className="text-[10px] text-slate-400">Max 2 Lates Only</span>
+                        </div>
+                        <span className={`font-mono font-extrabold ${b.excellentBonus > 0 ? 'text-emerald-600' : 'text-slate-400'}`}>
+                          {b.excellentBonus > 0 ? `+${b.excellentBonus}` : '0'}
+                        </span>
+                      </div>
+
+                      {/* Net Impact */}
+                      <div className="pt-2 flex justify-between items-center">
+                        <span className="font-extrabold text-slate-800 uppercase text-[10px]">Final Net Impact</span>
+                        <span className={`font-mono font-extrabold text-xs ${netImpact < 0 ? 'text-rose-600 font-black' : netImpact > 0 ? 'text-emerald-600 font-extrabold' : 'text-slate-500'}`}>
+                          {netImpact > 0 ? `+${netImpact}` : netImpact}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Score Breakdown details */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  {/* Employee Explanation View Card */}
+                  <div id="employee-explanation-modal" className="bg-white border-2 border-slate-200 rounded-xl p-5 shadow-xs space-y-4 font-sans">
+                    <div className="border-b pb-2.5 border-slate-250">
+                      <h5 className="font-extrabold text-slate-905 text-slate-900 text-xs tracking-tight flex items-center gap-1.5 uppercase">
+                        🏆 Why is my score {b.finalScore}?
+                      </h5>
+                      <span className="text-[9px] text-slate-400 mt-0.5 block">Audit log breakdown formula verification</span>
+                    </div>
+                    
+                    <div className="space-y-3 text-xs text-slate-700">
+                      <div className="flex justify-between items-center border-b border-dashed border-slate-100 pb-1.5">
+                        <span className="font-medium text-slate-600">Perfect Rating Benchmark</span>
+                        <span className="font-mono font-bold text-slate-800">100 pts</span>
+                      </div>
+
+                      {b.absentCount > 0 && (
+                        <div className="flex justify-between items-center border-b border-dashed border-slate-100 pb-1.5 text-rose-650">
+                          <div>
+                            <span className="font-bold">Absent Deductions</span>
+                            <span className="block text-[9px] text-slate-405 font-sans italic">{b.absentCount} day{b.absentCount > 1 ? 's' : ''} × -10</span>
+                          </div>
+                          <span className="font-mono font-extrabold">{b.absentPenalty} pts</span>
+                        </div>
+                      )}
+
+                      {b.lateCount > 0 && (
+                        <div className="flex justify-between items-center border-b border-dashed border-slate-100 pb-1.5 text-amber-700">
+                          <div>
+                            <span className="font-bold">Late Arrival Penalties</span>
+                            <span className="block text-[9px] text-slate-405 font-sans italic">{b.lateCount} shift{b.lateCount > 1 ? 's' : ''} × -2</span>
+                          </div>
+                          <span className="font-mono font-extrabold">{b.latePenalty} pts</span>
+                        </div>
+                      )}
+
+                      {b.missingCheckoutCount > 0 && (
+                        <div className="flex justify-between items-center border-b border-dashed border-slate-100 pb-1.5 text-rose-650">
+                          <div>
+                            <span className="font-bold">Missing Check-outs Penalties</span>
+                            <span className="block text-[9px] text-slate-405 font-sans italic">{b.missingCheckoutCount} date{b.missingCheckoutCount > 1 ? 's' : ''} × -5</span>
+                          </div>
+                          <span className="font-mono font-extrabold">{b.missingCheckoutPenalty} pts</span>
+                        </div>
+                      )}
+
+                      {b.shortCount > 0 && (
+                        <div className="flex justify-between items-center border-b border-dashed border-slate-100 pb-1.5 text-orange-705 text-orange-700">
+                          <div>
+                            <span className="font-bold">Short Working Hours Penalties</span>
+                            <span className="block text-[9px] text-slate-405 font-sans italic">{b.shortCount} shift{b.shortCount > 1 ? 's' : ''} × -1</span>
+                          </div>
+                          <span className="font-mono font-extrabold">{b.shortHoursPenalty} pts</span>
+                        </div>
+                      )}
+
+                      {b.sundayWorkedCount > 0 && (
+                        <div className="flex justify-between items-center border-b border-dashed border-slate-100 pb-1.5 text-emerald-700">
+                          <div>
+                            <span className="font-bold">Sunday Duty Incentives</span>
+                            <span className="block text-[9px] text-slate-405 font-sans italic">{b.sundayWorkedCount} Sunday{b.sundayWorkedCount > 1 ? 's' : ''} (max +8)</span>
+                          </div>
+                          <span className="font-mono font-extrabold">+{b.sundayWorkedBonus} pts</span>
+                        </div>
+                      )}
+
+                      {b.perfectBonus > 0 && (
+                        <div className="flex justify-between items-center border-b border-dashed border-slate-100 pb-1.5 text-emerald-750 font-bold">
+                          <div>
+                            <span>Perfect Month Attendance</span>
+                            <span className="block text-[9px] text-slate-405 font-sans font-normal italic">Pristine work roster bonus</span>
+                          </div>
+                          <span className="font-mono font-black">+{b.perfectBonus} pts</span>
+                        </div>
+                      )}
+
+                      {b.excellentBonus > 0 && (
+                        <div className="flex justify-between items-center border-b border-dashed border-slate-100 pb-1.5 text-emerald-700">
+                          <div>
+                            <span>Excellent Month Attendance</span>
+                            <span className="block text-[9px] text-slate-450 font-sans font-normal italic">Minimal tardiness recorded</span>
+                          </div>
+                          <span className="font-mono font-extrabold">+{b.excellentBonus} pts</span>
+                        </div>
+                      )}
+
+                      <div className="pt-1 flex justify-between items-center text-slate-950 font-bold">
+                        <span className="font-extrabold uppercase tracking-wide text-[9px] text-slate-500">Audit Equation:</span>
+                        <span className="font-mono text-xs text-indigo-800 bg-indigo-50 px-2 py-0.5 rounded">
+                          100
+                          {b.absentPenalty < 0 ? ` - ${Math.abs(b.absentPenalty)}` : ''}
+                          {b.latePenalty < 0 ? ` - ${Math.abs(b.latePenalty)}` : ''}
+                          {b.missingCheckoutPenalty < 0 ? ` - ${Math.abs(b.missingCheckoutPenalty)}` : ''}
+                          {b.shortHoursPenalty < 0 ? ` - ${Math.abs(b.shortHoursPenalty)}` : ''}
+                          {b.sundayWorkedBonus > 0 ? ` + ${b.sundayWorkedBonus}` : ''}
+                          {b.perfectBonus > 0 ? ` + 5` : ''}
+                          {b.excellentBonus > 0 ? ` + 2` : ''}
+                          {' = '}
+                          <span className="font-black text-xs text-indigo-900 font-mono tracking-tight">{b.finalScore} pts</span>
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs flex flex-col justify-between">
+                    <div>
+                      <h5 className="font-bold text-slate-800 text-xs uppercase tracking-wider mb-2.5 border-b pb-2">
+                        Incentive Action Recommendation
+                      </h5>
+                      <div className="mt-3">
+                        <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-black border uppercase tracking-wider ${monthlyStats.recommendation.color}`}>
+                          💡 {monthlyStats.recommendation.recommendation}
+                        </span>
+                        <p className="text-slate-500 text-[10px] leading-relaxed mt-2.5 font-medium">
+                          {monthlyStats.recommendation.description}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="text-[9px] text-slate-400 mt-4 leading-normal font-sans pt-2 border-t border-slate-100">
+                      Calculated automatically from actual logs based on company ruleset definition. Change reviews requests super-admin overrides.
+                    </div>
+                  </div>
+                </div>
+
+                {/* 1. Late Arrival Logs Table */}
+                <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-3">
+                  <div className="flex items-center gap-1.5 border-b pb-2">
+                    <Clock className="h-4.5 w-4.5 text-amber-500 animate-pulse" />
+                    <h5 className="font-bold text-xs uppercase tracking-wider text-slate-850">
+                      Late Arrival Logs ({formattedLates.length} items)
+                    </h5>
+                  </div>
+                  {formattedLates.length === 0 ? (
+                    <p className="text-xs text-slate-400 italic">Zero late arrival logs recorded this month.</p>
+                  ) : (
+                    <div className="border border-slate-100 rounded-lg overflow-hidden">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-slate-50 font-bold text-slate-500 border-b border-slate-200 text-[10px] uppercase tracking-wider">
+                            <th className="p-2.5">Date</th>
+                            <th className="p-2.5">Day</th>
+                            <th className="p-2.5">Check-In Time</th>
+                            <th className="p-2.5">Late minutes</th>
+                            <th className="p-2.5">Check-Out</th>
+                            <th className="p-2.5">Net Hours</th>
+                            <th className="p-2.5">Status</th>
+                            <th className="p-2.5">Remarks</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 text-slate-700 font-mono text-[11px]">
+                          {formattedLates.map(l => (
+                            <tr key={l.date} className="hover:bg-slate-50/50">
+                              <td className="p-2.5 font-bold">{l.date}</td>
+                              <td className="p-2.5 font-sans">{l.dayName}</td>
+                              <td className="p-2.5">{l.checkIn}</td>
+                              <td className="p-2.5 font-bold text-amber-600 bg-amber-50/30">{l.lateMins} mins</td>
+                              <td className="p-2.5">{l.checkout}</td>
+                              <td className="p-2.5 font-bold">{l.netHours} hrs</td>
+                              <td className="p-2.5 font-sans">
+                                <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                                  l.status.startsWith('Approved') || l.status.includes('Official') || l.status.includes('Emergency')
+                                    ? 'bg-sky-50 text-sky-700 border border-sky-100'
+                                    : 'bg-amber-50 text-amber-700 border border-amber-100'
+                                }`}>
+                                  {l.status}
+                                </span>
+                              </td>
+                              <td className="p-2.5 font-sans italic text-slate-500 text-[10px]">{l.remarks || '-'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                {/* 2. Absent Days Table */}
+                <div className="bg-rose-50/50 border border-rose-200 rounded-xl p-5 shadow-xs space-y-3">
+                  <div className="flex items-center gap-1.5 border-b border-rose-200 pb-2">
+                    <AlertCircle className="h-4.5 w-4.5 text-rose-600" />
+                    <h5 className="font-bold text-xs uppercase tracking-wider text-rose-800">
+                      Absent Days ({formattedAbsents.length} items)
+                    </h5>
+                  </div>
+                  {formattedAbsents.length === 0 ? (
+                    <p className="text-xs text-rose-600/60 italic">Zero absent days recorded this month.</p>
+                  ) : (
+                    <div className="border border-rose-100 rounded-lg overflow-hidden bg-white">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-rose-50/50 font-bold text-rose-700 border-b border-rose-100 text-[10px] uppercase tracking-wider">
+                            <th className="p-2.5">Date</th>
+                            <th className="p-2.5">Day</th>
+                            <th className="p-2.5 text-center">Status</th>
+                            <th className="p-2.5 text-center text-rose-700 font-bold">Penalty Impact</th>
+                            <th className="p-2.5 text-center">Approval Status</th>
+                            <th className="p-2.5">Reason / Remarks</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-rose-50 text-rose-800 font-mono text-[11px]">
+                          {formattedAbsents.map(a => (
+                            <tr key={a.date} className="hover:bg-rose-50/20">
+                              <td className="p-2.5 font-bold">{a.date}</td>
+                              <td className="p-2.5 font-sans">{a.dayName}</td>
+                              <td className="p-2.5 text-center font-bold text-rose-600">Absent</td>
+                              <td className="p-2.5 text-center font-bold text-rose-700 bg-rose-50/50">{a.penaltyImpact} pts</td>
+                              <td className="p-2.5 text-center font-sans">
+                                <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                                  a.approvalStatus === 'Unapproved' ? 'bg-rose-50 text-rose-700 border border-rose-100' : 'bg-sky-50 text-sky-700 border border-sky-100 font-bold'
+                                }`}>
+                                  {a.approvalStatus === 'Unapproved' ? 'Unapproved Absent' : a.approvalStatus}
+                                </span>
+                              </td>
+                              <td className="p-2.5 font-sans italic text-rose-800/80 text-[10px]">{a.remarks || '-'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                {/* 3. Missing Checkout Days Table */}
+                <div className="bg-amber-50/50 border border-amber-200 rounded-xl p-5 shadow-xs space-y-3">
+                  <div className="flex items-center gap-1.5 border-b border-amber-200 pb-2">
+                    <AlertTriangle className="h-4.5 w-4.5 text-amber-600" />
+                    <h5 className="font-bold text-xs uppercase tracking-wider text-amber-805 font-extrabold">
+                      Missing Checkout Days ({formattedMissingCheckouts.length} items)
+                    </h5>
+                  </div>
+                  {formattedMissingCheckouts.length === 0 ? (
+                    <p className="text-xs text-amber-600/60 italic">Zero missing checkout days recorded this month.</p>
+                  ) : (
+                    <div className="border border-amber-100 rounded-lg overflow-hidden bg-white">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-amber-50/50 font-bold text-amber-700 border-b border-amber-100 text-[10px] uppercase tracking-wider">
+                            <th className="p-2.5">Date</th>
+                            <th className="p-2.5">Day</th>
+                            <th className="p-2.5">Check-In</th>
+                            <th className="p-2.5">Check-Out</th>
+                            <th className="p-2.5 text-center">Status</th>
+                            <th className="p-2.5 text-center">Admin Review Status</th>
+                            <th className="p-2.5">Remarks</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-amber-50 text-amber-800 font-mono text-[11px]">
+                          {formattedMissingCheckouts.map(m => (
+                            <tr key={m.date} className="hover:bg-amber-50/20">
+                              <td className="p-2.5 font-bold">{m.date}</td>
+                              <td className="p-2.5 font-sans">{m.dayName}</td>
+                              <td className="p-2.5">{m.checkIn}</td>
+                              <td className="p-2.5 font-black text-rose-600">Missing</td>
+                              <td className="p-2.5 text-center font-sans">
+                                <span className="bg-rose-50 text-rose-700 border border-rose-100 px-1.5 py-0.5 rounded text-[9px] font-bold">
+                                  {m.status}
+                                </span>
+                              </td>
+                              <td className="p-2.5 text-center font-sans">
+                                <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                                  m.adminReviewStatus === 'Pending Review' ? 'bg-amber-50 text-amber-700 border border-amber-150' : 'bg-sky-50 text-sky-700 border border-sky-100 font-bold'
+                                }`}>
+                                  {m.adminReviewStatus}
+                                </span>
+                              </td>
+                              <td className="p-2.5 font-sans italic text-amber-805/85 text-[10px]">{m.remarks || '-'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                {/* 4. Short Hours Days Table */}
+                <div className="bg-orange-50/50 border border-orange-200 rounded-xl p-5 shadow-xs space-y-3">
+                  <div className="flex items-center gap-1.5 border-b border-orange-200 pb-2">
+                    <Clock className="h-4.5 w-4.5 text-orange-600" />
+                    <h5 className="font-bold text-xs uppercase tracking-wider text-slate-850">
+                      Short Hours Days ({formattedShortHours.length} items)
+                    </h5>
+                  </div>
+                  {formattedShortHours.length === 0 ? (
+                    <p className="text-xs text-orange-600/60 italic">Zero short hours shifts recorded this month.</p>
+                  ) : (
+                    <div className="border border-orange-100 rounded-lg overflow-hidden bg-white">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-orange-50/50 font-bold text-orange-700 border-b border-orange-100 text-[10px] uppercase tracking-wider">
+                            <th className="p-2.5">Date</th>
+                            <th className="p-2.5">Day</th>
+                            <th className="p-2.5">Check-In</th>
+                            <th className="p-2.5">Check-Out</th>
+                            <th className="p-2.5">Worked Hours</th>
+                            <th className="p-2.5">Required Hours</th>
+                            <th className="p-2.5 text-orange-600 font-bold">Short Hours</th>
+                            <th className="p-2.5 text-center font-semibold">Approval Status</th>
+                            <th className="p-2.5">Remarks</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-orange-50 text-orange-800 font-mono text-[11px]">
+                          {formattedShortHours.map(s => (
+                            <tr key={s.date} className="hover:bg-orange-50/10">
+                              <td className="p-2.5 font-bold">{s.date}</td>
+                              <td className="p-2.5 font-sans">{s.dayName}</td>
+                              <td className="p-2.5">{s.checkIn}</td>
+                              <td className="p-2.5">{s.checkout}</td>
+                              <td className="p-2.5">{s.workedHours} hrs</td>
+                              <td className="p-2.5">{s.requiredHours} hrs</td>
+                              <td className="p-2.5 font-bold text-orange-600 bg-orange-50/50">{s.shortHours} hrs</td>
+                              <td className="p-2.5 text-center font-sans">
+                                <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                                  s.approvalStatus === 'Pending Review' ? 'bg-orange-50 text-orange-700 border border-orange-150' : 'bg-sky-50 text-sky-700 border border-sky-100 font-bold'
+                                }`}>
+                                  {s.approvalStatus}
+                                </span>
+                              </td>
+                              <td className="p-2.5 font-sans italic text-orange-800/80 text-[10px]">{s.remarks || '-'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+              </div>
+            );
+          })()}
+
+          {/* TAB: CHRONOLOGICAL ACTIONS TIMELINE */}
+          {activeTab === 'timeline' && (
+            <div className="space-y-4 font-sans">
+              <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs">
+                <h4 className="font-extrabold text-slate-800 text-xs uppercase tracking-wide">
+                  Chronological unified Worker Timeline Feed
+                </h4>
+                <p className="text-[10px] text-slate-400 mt-0.5">Audit log of shift logs, loans, warning letters, and secure vault deposits</p>
+              </div>
+
+              {chronologicalTimeline.length === 0 ? (
+                <div className="bg-white rounded-xl border border-slate-200 p-8 text-center text-xs text-slate-400 font-sans italic">
+                  Clean feed. No transactions, warnings, files or custom events registered.
+                </div>
+              ) : (
+                <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-4 shadow-xs">
+                  <div className="relative border-l-2 border-slate-100 pl-4 space-y-5">
+                    {chronologicalTimeline.slice(0, 30).map((evt, idx) => (
+                      <div key={idx} className="relative text-xs">
+                        <div className={`absolute -left-[21px] top-1.5 h-2.5 w-2.5 rounded-full border border-white ${evt.color}`} />
+                        <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono">
+                          <span>{evt.date}</span>
+                          <span className="uppercase text-[8px] font-bold tracking-tight bg-slate-100 px-1 py-0.5 rounded border border-slate-200 text-slate-500">{evt.type}</span>
+                        </div>
+                        <h5 className="font-extrabold text-slate-800 mt-0.5 text-[11px]">{evt.title}</h5>
+                        <p className="text-slate-500 font-sans text-[10px] mt-0.5 leading-relaxed">{evt.desc}</p>
+                      </div>
+                    ))}
+                  </div>
+                  {chronologicalTimeline.length > 30 && (
+                    <p className="text-[9px] text-slate-400 italic text-center pt-2 border-t border-slate-100">Showing last 30 log events sequentially.</p>
+                  )}
+                </div>
+              )}
             </div>
           )}
 

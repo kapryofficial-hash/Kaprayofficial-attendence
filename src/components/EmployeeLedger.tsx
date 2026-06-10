@@ -8,7 +8,8 @@ import {
   getSundaysInMonth, 
   getSundayPaidOffStatus, 
   calculatePerformanceScore, 
-  getMonthlyRequiredHours 
+  getMonthlyRequiredHours,
+  getSmartBonusRecommendation
 } from '../utils';
 import { Printer, FileDown, Search, Filter, Award, Clock, Calendar, CheckSquare, Layers, FileCheck, Landmark, ShieldAlert, GitCommit } from 'lucide-react';
 
@@ -65,13 +66,14 @@ export function EmployeeLedger({
     const leaves = empMonthAttendance.filter(a => a.status === 'Leave').length;
     const offs = empMonthAttendance.filter(a => a.status === 'Off').length;
     const absents = empMonthAttendance.filter(a => a.status === 'Absent').length;
+    const lates = empMonthAttendance.filter(a => a.late_minutes > 0 && a.status !== 'Absent').length;
 
     // Sunday logic
     const sundaysInMonth = getSundaysInMonth(parseInt(y, 10), parseInt(m, 10));
     let paidWeeklyOffs = 0;
     let unpaidWeeklyOffs = 0;
-    let sundayOvertimeHours = 0;
     let sundayWorkedCount = 0;
+    let sundayWorkedHours = 0;
 
     const employeeAllAttendance = attendance.filter(a => a.employee_id === emp.id && !a.is_deleted);
 
@@ -81,14 +83,9 @@ export function EmployeeLedger({
         paidWeeklyOffs++;
       } else if (statusDetails.status === 'Unpaid Weekly Off') {
         unpaidWeeklyOffs++;
-      } else if (statusDetails.status === 'Sunday Overtime') {
-        paidWeeklyOffs++;
-        sundayOvertimeHours += statusDetails.overtimeHours;
-        sundayWorkedCount++;
       } else if (statusDetails.status === 'Sunday Worked') {
-        unpaidWeeklyOffs++;
-        sundayOvertimeHours += statusDetails.overtimeHours;
         sundayWorkedCount++;
+        sundayWorkedHours += statusDetails.workedHours || 0;
       }
     });
 
@@ -97,7 +94,10 @@ export function EmployeeLedger({
       status: a.status || '',
       late_minutes: a.late_minutes || 0,
       net_hours: a.net_hours || 0,
-      overtime_hours: a.overtime_hours || 0
+      overtime_hours: a.overtime_hours || 0,
+      short_hours: a.short_hours || 0,
+      manual_status: a.manual_status || 'Auto',
+      date: a.date
     })));
 
     const basicSalary = emp.base_salary || emp.salary || 0;
@@ -112,21 +112,32 @@ export function EmployeeLedger({
 
     const regularShortHours = empMonthAttendance.filter(a => {
       const dt = new Date(a.date);
-      return dt.getDay() !== 0;
+      if (dt.getDay() === 0) return false;
+      const isApprovedShort = [
+        'Approved Short Hours',
+        'Approved Late + Short Hours',
+        'Official Early Release',
+        'Medical Emergency',
+        'System / Machine Error',
+        'Official Duty'
+      ].includes(a.manual_status || '');
+      return !isApprovedShort;
     }).reduce((acc, a) => acc + (a.short_hours || 0), 0);
 
     const adjustedShortHours = Math.max(0, regularShortHours - regularOvertimeHours);
     const netPayableOvertimeHours = Math.max(0, regularOvertimeHours - regularShortHours);
 
     // Deducts
+    const unpaidLeavesCount = empMonthAttendance.filter(a => a.manual_status === 'Unpaid Leave').length;
     const absentDeduction = absents * (basicSalary / 30);
     const unpaidOffDeduction = unpaidWeeklyOffs * (basicSalary / 30);
+    const unpaidLeaveDeduction = unpaidLeavesCount * (basicSalary / 30);
 
     const timingBasedSalaryBase = Math.max(0, basicSalary - (adjustedShortHours * hourlyRate));
-    const timingBasedSalary = Math.max(0, timingBasedSalaryBase - absentDeduction - unpaidOffDeduction);
+    const timingBasedSalary = Math.max(0, timingBasedSalaryBase - absentDeduction - unpaidOffDeduction - unpaidLeaveDeduction);
 
     const regularOvertimePay = netPayableOvertimeHours * hourlyRate;
-    const sundayOvertimePay = sundayOvertimeHours * hourlyRate;
+    const sundayOvertimePay = 0; // Sundays never count as overtime pay
 
     // Commission
     const empComms = commissions.filter(c => c.employee_id === emp.id && c.month === m && c.year === y && c.approved_by);
@@ -152,8 +163,8 @@ export function EmployeeLedger({
     };
 
     // Policy Rule 4: No automatic final salary deduction for: Missing checkout, Sunday unpaid off, Late, Short hours.
-    // Thus, finalSalary before manual adjustment only automatically deducts standard workday absents.
-    const finalTimingBasedSalary = Math.max(0, basicSalary - absentDeduction);
+    // Thus, finalSalary before manual adjustment only automatically deducts standard workday absents and unpaid Sundays.
+    const finalTimingBasedSalary = Math.max(0, basicSalary - absentDeduction - unpaidOffDeduction - unpaidLeaveDeduction);
     const finalSalary = Math.round(finalTimingBasedSalary + regularOvertimePay + sundayOvertimePay + commissionAmount + totalAllowances + Number(reviewRecord.amount));
 
     return {
@@ -166,9 +177,11 @@ export function EmployeeLedger({
       paidWeeklyOffs,
       unpaidWeeklyOffs,
       sundayWorkedCount,
-      sundayOvertimeHours,
+      sundayWorkedHours,
+      sundayOvertimeHours: 0,
       score: scoreObj.score,
       remarks: scoreObj.remarks,
+      scoreObj,
       requiredHours: reqHours,
       hourlyRate,
       regularOvertimeHours,
@@ -189,6 +202,19 @@ export function EmployeeLedger({
       suggestedFinalSalary,
       review: reviewRecord,
       finalSalary,
+      attendancePercentage: (() => {
+        const total = presents + halfDays + leaves + offs + absents;
+        return total > 0 ? parseFloat((((presents + leaves + offs + (halfDays * 0.5)) / total) * 100).toFixed(1)) : 100;
+      })(),
+      recommendation: getSmartBonusRecommendation({
+        score: scoreObj.score,
+        attendancePercentage: (() => {
+          const total = presents + halfDays + leaves + offs + absents;
+          return total > 0 ? parseFloat((((presents + leaves + offs + (halfDays * 0.5)) / total) * 100).toFixed(1)) : 100;
+        })(),
+        absentsCount: absents,
+        lateCount: lates
+      }),
       logs: empMonthAttendance.sort((a,b) => a.date.localeCompare(b.date))
     };
   }, [selectedEmpId, filterMonth, filterYear, employees, attendance, commissions, allowances, salaryReviews]);
@@ -579,12 +605,45 @@ export function EmployeeLedger({
                   </p>
                 </div>
               </div>
-              <div className="w-full md:w-64 bg-white rounded border border-slate-200 p-3 text-[10px] font-mono divide-y divide-slate-100">
-                <div className="flex justify-between py-1"><span className="font-sans">Attendance Weightage (40m):</span> <strong>40/40</strong></div>
-                <div className="flex justify-between py-1"><span className="font-sans">Punctuality Weightage (30m):</span> <strong>{ledgerData.adjustedShortHours > 0 ? '20' : '30'}/30</strong></div>
-                <div className="flex justify-between py-1"><span className="font-sans">Required Duty Hours (30m):</span> <strong>{ledgerData.logs.filter(l => l.late_minutes > 15).length > 2 ? '22' : '30'}/30</strong></div>
+              <div className="w-full md:w-80 bg-white rounded border border-slate-200 p-3 text-[10px] font-mono divide-y divide-slate-100">
+                <div className="flex justify-between py-1 bg-slate-50 px-1"><span className="font-sans text-slate-500">Base Starting Score:</span> <strong>100 pts</strong></div>
+                {ledgerData.scoreObj?.breakdown?.absent_days ? (
+                  <div className="flex justify-between py-1 text-rose-600 px-1"><span className="font-sans">Unapproved Absence ({ledgerData.scoreObj.breakdown.absent_days}d):</span> <strong>-{ledgerData.scoreObj.breakdown.absent_days * 10} pts</strong></div>
+                ) : null}
+                {ledgerData.scoreObj?.breakdown?.late_days ? (
+                  <div className="flex justify-between py-1 text-rose-600 px-1"><span className="font-sans">Late Arrivals ({ledgerData.scoreObj.breakdown.late_days}d):</span> <strong>-{ledgerData.scoreObj.breakdown.late_days * 2} pts</strong></div>
+                ) : null}
+                {ledgerData.scoreObj?.breakdown?.short_days ? (
+                  <div className="flex justify-between py-1 text-rose-600 px-1"><span className="font-sans">Short Hours ({ledgerData.scoreObj.breakdown.short_days}d):</span> <strong>-{ledgerData.scoreObj.breakdown.short_days * 1} pts</strong></div>
+                ) : null}
+                {ledgerData.scoreObj?.breakdown?.missing_checkout ? (
+                  <div className="flex justify-between py-1 text-rose-600 px-1"><span className="font-sans">Missing Checkout ({ledgerData.scoreObj.breakdown.missing_checkout}d):</span> <strong>-{ledgerData.scoreObj.breakdown.missing_checkout * 5} pts</strong></div>
+                ) : null}
+                {ledgerData.scoreObj?.breakdown?.sunday_bonus ? (
+                  <div className="flex justify-between py-1 text-emerald-600 font-bold px-1"><span className="font-sans">Sunday Worked Bonus ({ledgerData.sundayWorkedCount}d):</span> <strong>+{ledgerData.scoreObj.breakdown.sunday_bonus} pts</strong></div>
+                ) : null}
+                {ledgerData.scoreObj?.breakdown?.perfect_attendance ? (
+                  <div className="flex justify-between py-1 text-emerald-600 font-bold px-1"><span className="font-sans">Perfect Month Attendance:</span> <strong>+5 pts</strong></div>
+                ) : null}
+                {ledgerData.scoreObj?.breakdown?.excellent_attendance ? (
+                  <div className="flex justify-between py-1 text-emerald-500 font-semibold px-1"><span className="font-sans">Excellent Attendance Bonus:</span> <strong>+2 pts</strong></div>
+                ) : null}
+                <div className="flex justify-between py-1.5 font-bold border-t border-slate-200 mt-1 pt-1 bg-emerald-50 text-emerald-800 px-1"><span className="font-sans">Final Score:</span> <span>{ledgerData.score} / 100</span></div>
               </div>
             </div>
+
+            {/* Recommendation Panel */}
+            <div className={`mt-4 border p-4 rounded-xl flex items-start gap-3.5 ${ledgerData.recommendation.color}`}>
+              <div className={`p-2 rounded-lg shrink-0 ${ledgerData.recommendation.badgeColor}`}>
+                <Award className="h-5 w-5" />
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-mono font-bold tracking-wider opacity-75">Automated ERP Executive Recommendation</span>
+                <h4 className="text-sm font-extrabold mt-0.5">{ledgerData.recommendation.recommendation}</h4>
+                <p className="text-xs mt-1 leading-relaxed max-w-2xl">{ledgerData.recommendation.description}</p>
+              </div>
+            </div>
+
           </div>
 
           {/* Attendance metrics */}
